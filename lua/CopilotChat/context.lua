@@ -371,6 +371,68 @@ function M.files(winnr, with_content)
   return out
 end
 
+-- mia funzione pazzerella per sopperire alla mancanza di uso delle hidden
+-- folders come context.
+function M.filesHidden(winnr, with_content)
+  local cwd = utils.win_cwd(winnr)
+
+  notify.publish(notify.STATUS, 'Scanning files')
+
+  local files = utils.scan_dir(cwd, {
+    hidden = true,
+    add_dirs = false,
+    respect_gitignore = true,
+  })
+
+  notify.publish(notify.STATUS, 'Reading files')
+
+  local out = {}
+
+  -- Create file list in chunks
+  local chunk_size = 100
+  for i = 1, #files, chunk_size do
+    local chunk = {}
+    for j = i, math.min(i + chunk_size - 1, #files) do
+      table.insert(chunk, files[j])
+    end
+
+    local chunk_number = math.floor(i / chunk_size)
+    local chunk_name = chunk_number == 0 and 'file_map' or 'file_map' .. tostring(chunk_number)
+
+    table.insert(out, {
+      content = table.concat(chunk, '\n'),
+      filename = chunk_name,
+      filetype = 'text',
+    })
+  end
+
+  -- Read all files if we want content as well
+  if with_content then
+    async.util.scheduler()
+
+    files = vim.tbl_filter(
+      function(file)
+        return file.ft ~= nil
+      end,
+      vim.tbl_map(function(file)
+        return {
+          name = utils.filepath(file),
+          ft = utils.filetype(file),
+        }
+      end, files)
+    )
+
+    for _, file in ipairs(files) do
+      local file_data = get_file(file.name, file.ft)
+      if file_data then
+        table.insert(out, file_data)
+      end
+    end
+  end
+
+  return out
+end
+
 --- Get the content of a file
 ---@param filename? string
 ---@return CopilotChat.context.embed?
