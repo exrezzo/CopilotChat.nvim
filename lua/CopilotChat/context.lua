@@ -586,6 +586,8 @@ end
 ---@param register string
 ---@return CopilotChat.context.embed?
 function M.register(register)
+  async.util.scheduler()
+
   local lines = vim.fn.getreg(register)
   if not lines or lines == '' then
     return nil
@@ -639,11 +641,12 @@ function M.quickfix()
 end
 
 --- Filter embeddings based on the query
----@param copilot CopilotChat.Copilot
+---@param client CopilotChat.Client
 ---@param prompt string
+---@param model string
 ---@param embeddings table<CopilotChat.context.embed>
 ---@return table<CopilotChat.context.embed>
-function M.filter_embeddings(copilot, prompt, embeddings)
+function M.filter_embeddings(client, prompt, model, embeddings)
   -- If we dont need to embed anything, just return directly
   if #embeddings < MULTI_FILE_THRESHOLD then
     return embeddings
@@ -664,7 +667,7 @@ function M.filter_embeddings(copilot, prompt, embeddings)
   })
 
   -- Get embeddings from all items
-  embeddings = copilot:embed(embeddings)
+  embeddings = client:embed(embeddings, model)
 
   -- Rate embeddings by relatedness to the query
   local embedded_query = table.remove(embeddings, #embeddings)

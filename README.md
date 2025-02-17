@@ -4,8 +4,9 @@
 
 [![Release](https://img.shields.io/github/v/release/CopilotC-Nvim/CopilotChat.nvim?logo=github&style=for-the-badge)](https://github.com/CopilotC-Nvim/CopilotChat.nvim/releases/latest)
 [![Build](https://img.shields.io/github/actions/workflow/status/CopilotC-Nvim/CopilotChat.nvim/ci.yml?logo=github&style=for-the-badge)](https://github.com/CopilotC-Nvim/CopilotChat.nvim/actions/workflows/ci.yml)
+[![Documentation](https://img.shields.io/badge/documentation-up-green.svg?logo=vim&style=for-the-badge)](https://copilotc-nvim.github.io/CopilotChat.nvim/)
+
 [![Contributors](https://img.shields.io/github/all-contributors/CopilotC-Nvim/CopilotChat.nvim?color=ee8449&logo=github&label=contributors&style=for-the-badge)](#contributors)
-[![Documentation](https://img.shields.io/badge/documentation-yes-brightgreen.svg?logo=vim&style=for-the-badge)](/doc/CopilotChat.txt)
 [![Discord](https://img.shields.io/discord/1200633211236122665?logo=discord&label=discord&style=for-the-badge)](https://discord.gg/vy6hJsTWaZ)
 [![Dotfyle](https://dotfyle.com/plugins/CopilotC-Nvim/CopilotChat.nvim/shield?style=for-the-badge)](https://dotfyle.com/plugins/CopilotC-Nvim/CopilotChat.nvim)
 
@@ -20,14 +21,14 @@ https://github.com/user-attachments/assets/8cad5643-63b2-4641-a5c4-68bc313f20e6
 - [Neovim 0.10.0+](https://neovim.io/) - Older versions are not officially supported
 - [curl](https://curl.se/) - 8.0.0+ is recommended for best compatibility. Should be installed by default on most systems and also shipped with Neovim
 - [Copilot chat in the IDE](https://github.com/settings/copilot) setting enabled in GitHub settings
-- _(Optional)_ [tiktoken_core](https://github.com/gptlang/lua-tiktoken) - Used for more accurate token counting
+- _Optional_ [tiktoken_core](https://github.com/gptlang/lua-tiktoken) - Used for more accurate token counting
   - For Arch Linux users, you can install [`luajit-tiktoken-bin`](https://aur.archlinux.org/packages/luajit-tiktoken-bin) or [`lua51-tiktoken-bin`](https://aur.archlinux.org/packages/lua51-tiktoken-bin) from aur
   - Alternatively, install via luarocks: `sudo luarocks install --lua-version 5.1 tiktoken_core`
   - Alternatively, download a pre-built binary from [lua-tiktoken releases](https://github.com/gptlang/lua-tiktoken/releases). You can check your Lua PATH in Neovim by doing `:lua print(package.cpath)`. Save the binary as `tiktoken_core.so` in any of the given paths.
-- _(Optional)_ [git](https://git-scm.com/) - Used for fetching git diffs for `git` context
+- _Optional_ [git](https://git-scm.com/) - Used for fetching git diffs for `git` context
   - For Arch Linux users, you can install [`git`](https://archlinux.org/packages/extra/x86_64/git) from the official repositories
   - For other systems, use your package manager to install `git`. For windows use the installer provided from git site
-- _(Optional)_ [lynx](https://lynx.invisible-island.net/) - Used for improved fetching of URLs for `url` context
+- _Optional_ [lynx](https://lynx.invisible-island.net/) - Used for improved fetching of URLs for `url` context
   - For Arch Linux users, you can install [`lynx`](https://archlinux.org/packages/extra/x86_64/lynx) from the official repositories
   - For other systems, use your package manager to install `lynx`. For windows use the installer provided from lynx site
 
@@ -36,7 +37,7 @@ https://github.com/user-attachments/assets/8cad5643-63b2-4641-a5c4-68bc313f20e6
 
 # Installation
 
-### [Lazy.nvim](https://github.com/folke/lazy.nvim)
+## [Lazy.nvim](https://github.com/folke/lazy.nvim)
 
 ```lua
 return {
@@ -57,7 +58,7 @@ return {
 
 See [@jellydn](https://github.com/jellydn) for [configuration](https://github.com/jellydn/lazy-nvim-ide/blob/main/lua/plugins/extras/copilot-chat-v2.lua)
 
-### [Vim-Plug](https://github.com/junegunn/vim-plug)
+## [Vim-Plug](https://github.com/junegunn/vim-plug)
 
 Similar to the lazy setup, you can use the following configuration:
 
@@ -75,7 +76,7 @@ require("CopilotChat").setup {
 EOF
 ```
 
-### Manual
+## Manual
 
 1. Put the files in the right place
 
@@ -341,6 +342,86 @@ You can chain multiple selections like this:
 }
 ```
 
+## Providers
+
+Providers are modules that implement integration with different AI providers. Built-in providers are:
+
+- `copilot` - Default GitHub Copilot provider used for chat and embeddings
+- `github_models` - Provider for GitHub Marketplace models
+
+You can define custom providers by adding them to `providers` config. Provider has following fields:
+
+- `disabled?: boolean` - Optional boolean to disable provider
+- `embeddings?: string` - Optional string pointing to provider to use for embeddings
+- `get_token(): string, number?` - Function that returns authentication token and optional expiry timestamp
+- `get_headers(token: string, sessionid: string, machineid: string): table` - Function that returns headers for API requests
+- `get_url(opts: table): string` - Function that returns API endpoint URL for given operation
+- `prepare_input(inputs: table, opts: table, model: table): table` - Function that prepares request body
+- `get_models?(headers: table): table` - Optional function that returns list of available models
+- `get_agents?(headers: table): table` - Optional function that returns list of available agents
+
+Example custom provider:
+
+```lua
+{
+  providers = {
+    my_provider = {
+      -- Required fields
+      get_token = function()
+        return "my-token", os.time() + 3600 -- Token valid for 1 hour
+      end,
+      get_headers = function(token, sessionid, machineid)
+        return {
+          ["authorization"] = "Bearer " .. token,
+          ["content-type"] = "application/json",
+        }
+      end,
+      get_url = function(opts)
+        if opts.agent then
+          return "https://api.custom.com/agents/" .. opts.agent
+        end
+        return "https://api.custom.com/chat"
+      end,
+      prepare_input = function(inputs, opts, model)
+        return {
+          messages = inputs,
+          temperature = opts.temperature,
+          model = opts.model,
+          stream = true
+        }
+      end,
+
+      -- Optional fields
+      disabled = false,
+      embeddings = "copilot_embeddings", -- Use copilot for embeddings
+      get_models = function(headers)
+        -- Return list of available models
+        return {
+          {
+            id = "gpt-4",
+            name = "GPT-4",
+            version = "1.0",
+            tokenizer = "gpt2",
+            max_prompt_tokens = 8000,
+            max_output_tokens = 2000,
+          }
+        }
+      end,
+      get_agents = function(headers)
+        -- Return list of available agents
+        return {
+          {
+            id = "agent1",
+            name = "My Agent",
+            description = "Custom agent"
+          }
+        }
+      end
+    }
+  }
+}
+```
+
 ## API
 
 ```lua
@@ -482,6 +563,19 @@ Also see [here](/lua/CopilotChat/config.lua):
   error_header = '# Error ', -- Header to use for errors
   separator = '───', -- Separator to use in chat
 
+  -- default providers
+  providers = {
+    copilot = {
+      -- see config.lua for implementation
+    },
+    github_models = {
+      -- see config.lua for implementation
+    },
+    copilot_embeddings = {
+      -- see config.lua for implementation
+    },
+  }
+
   -- default contexts
   contexts = {
     buffer = {
@@ -517,7 +611,6 @@ Also see [here](/lua/CopilotChat/config.lua):
     },
     Review = {
       prompt = '> /COPILOT_REVIEW\n\nReview the selected code.',
-      -- see config.lua for implementation
     },
     Fix = {
       prompt = '> /COPILOT_GENERATE\n\nThere is a problem in this code. Rewrite the code to show it with the bug fixed.',
@@ -780,14 +873,9 @@ This sets the `selection = false` to be able to ask generic questions unrelated 
 
 </details>
 
-# Roadmap
-
-- Improved caching for context (persistence through restarts/smarter caching)
-- General QOL improvements
-
 # Development
 
-### Installing Pre-commit Tool
+## Installing Pre-commit Tool
 
 For development, you can use the provided Makefile command to install the pre-commit tool:
 
@@ -881,6 +969,6 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 
 This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification. Contributions of any kind are welcome!
 
-### Stargazers over time
+## Stargazers over time
 
 [![Stargazers over time](https://starchart.cc/CopilotC-Nvim/CopilotChat.nvim.svg)](https://starchart.cc/CopilotC-Nvim/CopilotChat.nvim)
