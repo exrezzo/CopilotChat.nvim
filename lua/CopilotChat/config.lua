@@ -40,12 +40,13 @@ local select = require('CopilotChat.select')
 ---@field proxy string?
 ---@field allow_insecure boolean?
 ---@field chat_autocomplete boolean?
+---@field log_path string?
 ---@field history_path string?
 ---@field question_header string?
 ---@field answer_header string?
 ---@field error_header string?
 ---@field separator string?
----@field providers table<string, CopilotChat.Provider?>
+---@field providers table<string, CopilotChat.Provider>?
 ---@field contexts table<string, CopilotChat.config.context>?
 ---@field prompts table<string, CopilotChat.config.prompt|string>?
 ---@field mappings CopilotChat.config.mappings?
@@ -101,6 +102,8 @@ return {
   allow_insecure = false, -- Allow insecure server connections
 
   chat_autocomplete = true, -- Enable chat autocompletion (when disabled, requires manual `mappings.complete` trigger)
+
+  log_path = vim.fn.stdpath('state') .. '/CopilotChat.log', -- Default path to log file
   history_path = vim.fn.stdpath('data') .. '/copilotchat_history', -- Default path to stored history
 
   question_header = '## User ', -- Header to use for user questions

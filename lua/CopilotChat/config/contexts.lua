@@ -1,11 +1,13 @@
+local async = require('plenary.async')
 local context = require('CopilotChat.context')
 local utils = require('CopilotChat.utils')
 
 ---@class CopilotChat.config.context
 ---@field description string?
 ---@field input fun(callback: fun(input: string?), source: CopilotChat.source)?
----@field resolve fun(input: string?, source: CopilotChat.source):table<CopilotChat.context.embed>
+---@field resolve fun(input: string?, source: CopilotChat.source, prompt: string):table<CopilotChat.context.embed>
 
+---@type table<string, CopilotChat.config.context>
 return {
   buffer = {
     description = 'Includes specified buffer in chat context. Supports input (default current).',
@@ -53,10 +55,13 @@ return {
     description = 'Includes content of provided file in chat context. Supports input.',
     input = function(callback, source)
       local cwd = utils.win_cwd(source.winnr)
-      local files = vim.tbl_filter(function(file)
-        return vim.fn.isdirectory(file) == 0
-      end, vim.fn.glob(cwd .. '/**/*', false, true))
+      local files = utils.scan_dir(cwd, {
+        add_dirs = false,
+        respect_gitignore = true,
+        max_files = 1000,
+      })
 
+      async.util.scheduler()
       vim.ui.select(files, {
         prompt = 'Select a file> ',
       }, callback)
@@ -72,7 +77,7 @@ return {
     input = function(callback)
       local choices = utils.kv_list({
         list = 'Only lists file names',
-        full = 'Includes file content for each file found. Can be slow on large workspaces, use with care.',
+        full = 'Includes file content for each file found, up to a limit.',
       })
 
       vim.ui.select(choices, {

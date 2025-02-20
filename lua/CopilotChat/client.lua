@@ -1,13 +1,20 @@
 ---@class CopilotChat.Client.ask
+---@field history table
 ---@field selection CopilotChat.select.selection?
 ---@field embeddings table<CopilotChat.context.embed>?
 ---@field system_prompt string
 ---@field model string
 ---@field agent string
----@field temperature number?
----@field no_history boolean?
----@field on_progress nil|fun(response: string):nil
+---@field temperature number
+---@field on_progress fun(response: string):nil
 
+---@class CopilotChat.Client.model : CopilotChat.Provider.model
+---@field provider string
+
+---@class CopilotChat.Client.agent : CopilotChat.Provider.agent
+---@field provider string
+
+local async = require('plenary.async')
 local log = require('plenary.log')
 local tiktoken = require('CopilotChat.tiktoken')
 local notify = require('CopilotChat.notify')
@@ -21,6 +28,42 @@ local LINE_CHARACTERS = 100
 local BIG_FILE_THRESHOLD = 2000 * LINE_CHARACTERS
 local BIG_EMBED_THRESHOLD = 200 * LINE_CHARACTERS
 local TRUNCATED = '... (truncated)'
+
+--- Resolve provider function
+---@param model string
+---@param models table<string, CopilotChat.Client.model>
+---@param providers table<string, CopilotChat.Provider>
+---@return string, function
+local function resolve_provider_function(name, model, models, providers)
+  local model_config = models[model]
+  if not model_config then
+    error('Model not found: ' .. model)
+  end
+
+  local provider_name = model_config.provider
+  if not provider_name then
+    error('Provider not found for model: ' .. model)
+  end
+  local provider = providers[provider_name]
+  if not provider then
+    error('Provider not found: ' .. provider_name)
+  end
+
+  local func = provider[name]
+  if type(func) == 'string' then
+    provider_name = func
+    provider = providers[provider_name]
+    if not provider then
+      error('Provider not found: ' .. provider_name)
+    end
+    func = provider[name]
+  end
+  if not func then
+    error('Function not found: ' .. name)
+  end
+
+  return provider_name, func
+end
 
 --- Generate content block with line numbers, truncating if necessary
 ---@param content string: The content
@@ -57,6 +100,7 @@ end
 
 --- Generate messages for the given selection
 --- @param selection CopilotChat.select.selection
+--- @return table<CopilotChat.Provider.input>
 local function generate_selection_messages(selection)
   local filename = selection.filename or 'unknown'
   local filetype = selection.filetype or 'text'
@@ -117,6 +161,7 @@ end
 
 --- Generate messages for the given embeddings
 --- @param embeddings table<CopilotChat.context.embed>
+--- @return table<CopilotChat.Provider.input>
 local function generate_embeddings_messages(embeddings)
   return vim.tbl_map(function(embedding)
     return {
@@ -132,6 +177,11 @@ local function generate_embeddings_messages(embeddings)
   end, embeddings)
 end
 
+--- Generate ask request
+--- @param history table<CopilotChat.Provider.input>
+--- @param prompt string
+--- @param system_prompt string
+--- @param generated_messages table<CopilotChat.Provider.input>
 local function generate_ask_request(history, prompt, system_prompt, generated_messages)
   local messages = {}
   local contexts = {}
@@ -170,6 +220,10 @@ local function generate_ask_request(history, prompt, system_prompt, generated_me
   return messages
 end
 
+--- Generate embedding request
+--- @param inputs table<CopilotChat.context.embed>
+--- @param threshold number
+--- @return table<string>
 local function generate_embedding_request(inputs, threshold)
   return vim.tbl_map(function(embedding)
     local content =
@@ -189,32 +243,20 @@ end
 
 ---@class CopilotChat.Client : Class
 ---@field providers table<string, CopilotChat.Provider>
----@field history table
 ---@field provider_cache table<string, table>
----@field embedding_cache table<CopilotChat.context.embed>
----@field models table<string, table>?
----@field agents table<string, table>?
+---@field embedding_cache table<string, CopilotChat.context.embed>
+---@field models table<string, CopilotChat.Client.model>?
+---@field agents table<string, CopilotChat.Client.agent>?
 ---@field current_job string?
----@field github_token string?
----@field token table?
----@field sessionid string?
----@field machineid string
-local Client = class(function(self, providers)
-  self.providers = providers
-  self.history = {}
+---@field headers table<string, string>?
+local Client = class(function(self)
+  self.providers = {}
+  self.provider_cache = {}
   self.embedding_cache = {}
   self.models = nil
   self.agents = nil
-
-  self.provider_cache = {}
-  for provider_name, _ in pairs(providers) do
-    self.provider_cache[provider_name] = {}
-  end
-
   self.current_job = nil
-  self.expires_at = nil
   self.headers = nil
-  self.machineid = utils.machine_id()
 end)
 
 --- Authenticate with GitHub and get the required headers
@@ -226,11 +268,12 @@ function Client:authenticate(provider_name)
   local expires_at = self.provider_cache[provider_name].expires_at
 
   if not headers or (expires_at and expires_at <= math.floor(os.time())) then
-    notify.publish(notify.STATUS, 'Authenticating to provider ' .. provider_name)
+    local token
+    if provider.get_token then
+      token, expires_at = provider.get_token()
+    end
 
-    local token, expires_at = provider.get_token()
-    local sessionid = utils.uuid() .. tostring(math.floor(os.time() * 1000))
-    headers = provider.get_headers(token, sessionid, self.machineid)
+    headers = provider.get_headers(token)
     self.provider_cache[provider_name].headers = headers
     self.provider_cache[provider_name].expires_at = expires_at
   end
@@ -239,49 +282,71 @@ function Client:authenticate(provider_name)
 end
 
 --- Fetch models from the Copilot API
----@return table<string, table>
+---@return table<string, CopilotChat.Client.model>
 function Client:fetch_models()
   if self.models then
     return self.models
   end
 
   local models = {}
-  for provider_name, provider in pairs(self.providers) do
+  local provider_order = vim.tbl_keys(self.providers)
+  table.sort(provider_order)
+  for _, provider_name in ipairs(provider_order) do
+    local provider = self.providers[provider_name]
     if not provider.disabled and provider.get_models then
-      local headers = self:authenticate(provider_name)
       notify.publish(notify.STATUS, 'Fetching models from ' .. provider_name)
-      local provider_models = provider.get_models(headers)
-      for _, model in ipairs(provider_models) do
-        model.provider = provider_name
-        if not models[model.id] then
+      local headers = self:authenticate(provider_name)
+      local ok, provider_models = pcall(provider.get_models, headers)
+      if ok then
+        for _, model in ipairs(provider_models) do
+          model.provider = provider_name
+          if not model.version then
+            model.version = model.id
+          end
+
+          if models[model.id] then
+            model.id = model.id .. ':' .. provider_name
+            model.version = model.version .. ':' .. provider_name
+          end
           models[model.id] = model
         end
+      else
+        log.warn('Failed to fetch models from ' .. provider_name .. ': ' .. provider_models)
       end
     end
   end
 
+  log.debug('Fetched models: ', vim.inspect(models))
   self.models = models
   return self.models
 end
 
 --- Fetch agents from the Copilot API
----@return table<string, table>
+---@return table<string, CopilotChat.Client.agent>
 function Client:fetch_agents()
   if self.agents then
     return self.agents
   end
 
   local agents = {}
-  for provider_name, provider in pairs(self.providers) do
+  local provider_order = vim.tbl_keys(self.providers)
+  table.sort(provider_order)
+  for _, provider_name in ipairs(provider_order) do
+    local provider = self.providers[provider_name]
     if not provider.disabled and provider.get_agents then
-      local headers = self:authenticate(provider_name)
       notify.publish(notify.STATUS, 'Fetching agents from ' .. provider_name)
-      local provider_agents = provider.get_agents(headers)
-      for _, agent in ipairs(provider_agents) do
-        agent.provider = provider_name
-        if not agents[agent.id] then
+      local headers = self:authenticate(provider_name)
+      local ok, provider_agents = pcall(provider.get_agents, headers)
+      if ok then
+        for _, agent in ipairs(provider_agents) do
+          agent.provider = provider_name
+          if agents[agent.id] then
+            agent.id = agent.id .. ':' .. provider_name
+          end
           agents[agent.id] = agent
         end
+      else
+        log.warn('Failed to fetch agents from ' .. provider_name .. ': ' .. provider_agents)
       end
     end
   end
@@ -293,6 +358,7 @@ end
 --- Ask a question to Copilot
 ---@param prompt string: The prompt to send to Copilot
 ---@param opts CopilotChat.Client.ask: Options for the request
+---@return string?, table?, number?, number?
 function Client:ask(prompt, opts)
   opts = opts or {}
   prompt = vim.trim(prompt)
@@ -301,18 +367,19 @@ function Client:ask(prompt, opts)
     opts.agent = nil
   end
 
+  local history = opts.history or {}
   local embeddings = opts.embeddings or {}
   local selection = opts.selection or {}
   local system_prompt = vim.trim(opts.system_prompt)
   local model = opts.model
   local agent = opts.agent
-  local temperature = opts.temperature or 0.1
-  local no_history = opts.no_history or false
+  local temperature = opts.temperature
   local on_progress = opts.on_progress
   local job_id = utils.uuid()
   self.current_job = job_id
 
   log.trace('System prompt: ', system_prompt)
+  log.trace('History: ', #history)
   log.trace('Selection: ', selection.content)
   log.debug('Prompt: ', prompt)
   log.debug('Embeddings: ', #embeddings)
@@ -320,11 +387,16 @@ function Client:ask(prompt, opts)
   log.debug('Agent: ', agent)
   log.debug('Temperature: ', temperature)
 
-  local history = no_history and {} or self.history
   local models = self:fetch_models()
   local model_config = models[model]
   if not model_config then
     error('Model not found: ' .. model)
+  end
+
+  local agents = self:fetch_agents()
+  local agent_config = agent and agents[agent]
+  if agent and not agent_config then
+    error('Agent not found: ' .. agent)
   end
 
   local provider_name = model_config.provider
@@ -336,62 +408,96 @@ function Client:ask(prompt, opts)
     error('Provider not found: ' .. provider_name)
   end
 
-  local max_tokens = model_config.max_prompt_tokens
+  local options = {
+    model = vim.tbl_extend('force', model_config, {
+      id = opts.model:gsub(':' .. provider_name .. '$', ''),
+    }),
+    agent = agent_config and vim.tbl_extend('force', agent_config, {
+      id = opts.agent and opts.agent:gsub(':' .. provider_name .. '$', ''),
+    }),
+    temperature = temperature,
+  }
+
+  local max_tokens = model_config.max_input_tokens
   local tokenizer = model_config.tokenizer or 'o200k_base'
   log.debug('Max tokens: ', max_tokens)
   log.debug('Tokenizer: ', tokenizer)
-  tiktoken.load(tokenizer)
+
+  if max_tokens and tokenizer then
+    tiktoken.load(tokenizer)
+  end
+
+  notify.publish(notify.STATUS, 'Generating request')
+
+  async.util.scheduler()
+  local references = {}
+  for _, embed in ipairs(embeddings) do
+    table.insert(references, {
+      name = utils.filename(embed.filename),
+      url = embed.filename,
+    })
+  end
 
   local generated_messages = {}
   local selection_messages = generate_selection_messages(selection)
   local embeddings_messages = generate_embeddings_messages(embeddings)
-  local generated_tokens = 0
-  for _, message in ipairs(selection_messages) do
-    generated_tokens = generated_tokens + tiktoken.count(message.content)
-    table.insert(generated_messages, message)
-  end
 
-  -- Count required tokens that we cannot reduce
-  local prompt_tokens = tiktoken.count(prompt)
-  local system_tokens = tiktoken.count(system_prompt)
-  local required_tokens = prompt_tokens + system_tokens + generated_tokens
-
-  -- Reserve space for first embedding
-  local reserved_tokens = #embeddings_messages > 0
-      and tiktoken.count(embeddings_messages[1].content)
-    or 0
-
-  -- Calculate how many tokens we can use for history
-  local history_limit = max_tokens - required_tokens - reserved_tokens
-  local history_tokens = 0
-  for _, msg in ipairs(history) do
-    history_tokens = history_tokens + tiktoken.count(msg.content)
-  end
-
-  -- If we're over history limit, truncate history from the beginning
-  while history_tokens > history_limit and #history > 0 do
-    local removed = table.remove(history, 1)
-    history_tokens = history_tokens - tiktoken.count(removed.content)
-  end
-
-  -- Now add as many files as possible with remaining token budget (back to front)
-  local remaining_tokens = max_tokens - required_tokens - history_tokens
-  for i = #embeddings_messages, 1, -1 do
-    local message = embeddings_messages[i]
-    local tokens = tiktoken.count(message.content)
-    if remaining_tokens - tokens >= 0 then
-      remaining_tokens = remaining_tokens - tokens
+  if max_tokens then
+    -- Count tokens from embeddings
+    local generated_tokens = 0
+    for _, message in ipairs(selection_messages) do
+      generated_tokens = generated_tokens + tiktoken.count(message.content)
       table.insert(generated_messages, message)
-    else
-      break
+    end
+
+    -- Count required tokens that we cannot reduce
+    local prompt_tokens = tiktoken.count(prompt)
+    local system_tokens = tiktoken.count(system_prompt)
+    local required_tokens = prompt_tokens + system_tokens + generated_tokens
+
+    -- Reserve space for first embedding
+    local reserved_tokens = #embeddings_messages > 0
+        and tiktoken.count(embeddings_messages[1].content)
+      or 0
+
+    -- Calculate how many tokens we can use for history
+    local history_limit = max_tokens - required_tokens - reserved_tokens
+    local history_tokens = 0
+    for _, msg in ipairs(history) do
+      history_tokens = history_tokens + tiktoken.count(msg.content)
+    end
+
+    -- If we're over history limit, truncate history from the beginning
+    while history_tokens > history_limit and #history > 0 do
+      local removed = table.remove(history, 1)
+      history_tokens = history_tokens - tiktoken.count(removed.content)
+    end
+
+    -- Now add as many files as possible with remaining token budget (back to front)
+    local remaining_tokens = max_tokens - required_tokens - history_tokens
+    for i = #embeddings_messages, 1, -1 do
+      local message = embeddings_messages[i]
+      local tokens = tiktoken.count(message.content)
+      if remaining_tokens - tokens >= 0 then
+        remaining_tokens = remaining_tokens - tokens
+        table.insert(generated_messages, message)
+      else
+        break
+      end
+    end
+  else
+    -- Add all embedding messages as we cant limit them
+    for _, message in ipairs(embeddings_messages) do
+      table.insert(generated_messages, message)
     end
   end
+
+  log.debug('Generated messages: ', #generated_messages)
 
   local last_message = nil
   local errored = false
   local finished = false
   local full_response = ''
-  local full_references = ''
 
   local function finish_stream(err, job)
     if err then
@@ -405,10 +511,11 @@ function Client:ask(prompt, opts)
   end
 
   local function parse_line(line, job)
-    if not line then
+    if not line or line == '' then
       return
     end
 
+    log.debug('Response line: ', line)
     notify.publish(notify.STATUS, '')
 
     local ok, content = pcall(vim.json.decode, line, {
@@ -428,40 +535,22 @@ function Client:ask(prompt, opts)
       return
     end
 
-    if content.copilot_references then
-      for _, reference in ipairs(content.copilot_references) do
-        local metadata = reference.metadata
-        if metadata and metadata.display_name and metadata.display_url then
-          full_references = full_references
-            .. '\n'
-            .. '['
-            .. metadata.display_name
-            .. ']'
-            .. '('
-            .. metadata.display_url
-            .. ')'
-        end
+    local out = provider.prepare_output(content, options)
+    if out.references then
+      for _, reference in ipairs(out.references) do
+        table.insert(references, reference)
       end
     end
 
-    if not content.choices or #content.choices == 0 then
-      return
+    last_message = out
+
+    if out.content then
+      full_response = full_response .. out.content
+      on_progress(out.content)
     end
 
-    last_message = content
-    local choice = content.choices[1]
-    content = choice.message and choice.message.content or choice.delta and choice.delta.content
-
-    if content then
-      full_response = full_response .. content
-    end
-
-    if content and on_progress then
-      on_progress(content)
-    end
-
-    if choice.finish_reason and job then
-      local reason = choice.finish_reason
+    if job and out.finish_reason then
+      local reason = out.finish_reason
       if reason == 'stop' then
         reason = nil
       else
@@ -473,9 +562,6 @@ function Client:ask(prompt, opts)
 
   local function parse_stream_line(line, job)
     line = vim.trim(line)
-    if not vim.startswith(line, 'data:') then
-      return
-    end
     line = line:gsub('^data:', '')
     line = vim.trim(line)
 
@@ -507,11 +593,12 @@ function Client:ask(prompt, opts)
     parse_stream_line(line, job)
   end
 
+  notify.publish(notify.STATUS, 'Thinking')
+
   local headers = self:authenticate(provider_name)
   local request = provider.prepare_input(
     generate_ask_request(history, prompt, system_prompt, generated_messages),
-    opts,
-    model_config
+    options
   )
   local is_stream = request.stream
   local body = vim.json.encode(request)
@@ -525,12 +612,10 @@ function Client:ask(prompt, opts)
     args.stream = stream_func
   end
 
-  notify.publish(notify.STATUS, 'Thinking')
-
-  local response, err = utils.curl_post(provider.get_url(opts), args)
+  local response, err = utils.curl_post(provider.get_url(options), args)
 
   if self.current_job ~= job_id then
-    return nil, nil, nil
+    return
   end
 
   self.current_job = nil
@@ -579,7 +664,7 @@ function Client:ask(prompt, opts)
   end
 
   if is_stream then
-    if full_response == '' then
+    if not full_response then
       for _, line in ipairs(vim.split(response.body, '\n')) do
         parse_stream_line(line)
       end
@@ -588,40 +673,15 @@ function Client:ask(prompt, opts)
     parse_line(response.body)
   end
 
-  if full_response == '' then
+  if not full_response then
     error('Failed to get response: empty response')
     return
-  end
-
-  if full_references ~= '' then
-    full_references = '\n\n**`References:`**' .. full_references
-    full_response = full_response .. full_references
-    if on_progress then
-      on_progress(full_references)
-    end
   end
 
   log.trace('Full response: ', full_response)
   log.debug('Last message: ', last_message)
 
-  table.insert(history, {
-    content = prompt,
-    role = 'user',
-  })
-
-  table.insert(history, {
-    content = full_response,
-    role = 'assistant',
-  })
-
-  if not no_history then
-    log.debug('History size increased to ' .. #history)
-    self.history = history
-  end
-
-  return full_response,
-    last_message and last_message.usage and last_message.usage.total_tokens,
-    max_tokens
+  return full_response, references, last_message and last_message.total_tokens or 0, max_tokens
 end
 
 --- List available models
@@ -632,7 +692,7 @@ function Client:list_models()
   -- First deduplicate by version, keeping shortest ID
   local version_map = {}
   for id, model in pairs(models) do
-    local version = model.version
+    local version = model.version or model.id
     if not version_map[version] or #id < #version_map[version] then
       version_map[version] = id
     end
@@ -681,27 +741,7 @@ function Client:embed(inputs, model)
   end
 
   local models = self:fetch_models()
-  local model_config = models[model]
-  if not model_config then
-    error('Model not found: ' .. model)
-  end
-
-  local provider_name = model_config.provider
-  if not provider_name then
-    error('Provider not found for model: ' .. model)
-  end
-  local provider = self.providers[model_config.provider]
-  if not provider then
-    error('Provider not found: ' .. model_config.provider)
-  end
-  provider_name = provider.embeddings
-  if not provider_name then
-    error('Provider not found for embeddings: ' .. provider_name)
-  end
-  provider = self.providers[provider_name]
-  if not provider then
-    error('Provider not found: ' .. provider_name)
-  end
+  local provider_name, embed = resolve_provider_function('embed', model, models, self.providers)
 
   notify.publish(notify.STATUS, 'Generating embeddings for ' .. #inputs .. ' inputs')
 
@@ -740,17 +780,11 @@ function Client:embed(inputs, model)
     local success = false
     local attempts = 0
     while not success and attempts < 5 do -- Limit total attempts to 5
-      local body = vim.json.encode(
-        provider.prepare_input(generate_embedding_request(batch, threshold), {}, {})
-      )
+      local ok, data =
+        pcall(embed, generate_embedding_request(batch, threshold), self:authenticate(provider_name))
 
-      local response, err = utils.curl_post(provider.get_url({}), {
-        headers = self:authenticate(provider_name),
-        body = temp_file(body),
-      })
-
-      if err or not response or response.status ~= 200 then
-        log.debug('Failed to get embeddings: ', err)
+      if not ok then
+        log.debug('Failed to get embeddings: ', data)
         attempts = attempts + 1
         -- If we have few items and the request failed, try reducing threshold first
         if #batch <= 5 then
@@ -772,15 +806,8 @@ function Client:embed(inputs, model)
         end
       else
         success = true
-
-        -- Process and cache results
-        local ok, content = pcall(vim.json.decode, response.body)
-        if not ok then
-          error('Failed to parse embedding response: ' .. response.body)
-        end
-
-        for _, embedding in ipairs(content.data) do
-          local result = vim.tbl_extend('keep', batch[embedding.index + 1], embedding)
+        for _, embedding in ipairs(data) do
+          local result = vim.tbl_extend('force', batch[embedding.index + 1], embedding)
           table.insert(results, result)
 
           local cache_key = result.filename .. utils.quick_hash(result.content)
@@ -817,53 +844,19 @@ function Client:reset()
   return stopped
 end
 
---- Save the history to a file
----@param name string: The name to save the history to
----@param path string: The path to save the history to
-function Client:save(name, path)
-  local history = vim.json.encode(self.history)
-  path = vim.fn.expand(path)
-  vim.fn.mkdir(path, 'p')
-  path = path .. '/' .. name .. '.json'
-  local file = io.open(path, 'w')
-  if not file then
-    log.error('Failed to save history to ' .. path)
-    return
-  end
-
-  file:write(history)
-  file:close()
-  log.info('Saved Copilot history to ' .. path)
-end
-
---- Load the history from a file
----@param name string: The name to load the history from
----@param path string: The path to load the history from
----@return table
-function Client:load(name, path)
-  path = vim.fn.expand(path) .. '/' .. name .. '.json'
-  local file = io.open(path, 'r')
-  if not file then
-    return {}
-  end
-
-  local history = file:read('*a')
-  file:close()
-  self.history = vim.json.decode(history, {
-    luanil = {
-      object = true,
-      array = true,
-    },
-  })
-
-  log.info('Loaded Copilot history from ' .. path)
-  return self.history
-end
-
 --- Check if there is a running job
 ---@return boolean
 function Client:running()
   return self.current_job ~= nil
 end
 
-return Client
+--- Load providers to client
+function Client:load_providers(providers)
+  self.providers = providers
+  for provider_name, _ in pairs(providers) do
+    self.provider_cache[provider_name] = {}
+  end
+end
+
+--- @type CopilotChat.Client
+return Client()
