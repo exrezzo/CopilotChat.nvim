@@ -16,6 +16,7 @@ local WORD = '([^%s]+)'
 --- @field source CopilotChat.source?
 --- @field last_prompt string?
 --- @field last_response string?
+--- @field highlights_loaded boolean
 --- @field chat CopilotChat.ui.Chat?
 --- @field diff CopilotChat.ui.Diff?
 --- @field overlay CopilotChat.ui.Overlay?
@@ -26,12 +27,34 @@ local state = {
   -- Last state tracking
   last_prompt = nil,
   last_response = nil,
+  highlights_loaded = false,
 
   -- Overlays
   chat = nil,
   diff = nil,
   overlay = nil,
 }
+
+--- Update the highlights in chat buffer
+local function update_highlights()
+  if state.highlights_loaded then
+    return
+  end
+
+  M.complete_items(function(items)
+    for _, item in ipairs(items) do
+      local pattern = vim.fn.escape(item.word, '.-$^*[]')
+      if vim.startswith(item.word, '#') then
+        vim.cmd('syntax match CopilotChatKeyword "' .. pattern .. '\\(:.\\+\\)\\?" containedin=ALL')
+      else
+        vim.cmd('syntax match CopilotChatKeyword "' .. pattern .. '" containedin=ALL')
+      end
+    end
+
+    vim.cmd('syntax match CopilotChatInput ":\\(.\\+\\)" contained containedin=CopilotChatKeyword')
+    state.highlights_loaded = true
+  end)
+end
 
 --- Highlights the selection in the source buffer.
 ---@param clear boolean
@@ -113,9 +136,13 @@ local function show_error(err, append_newline)
   err = err or 'Unknown error'
 
   if type(err) == 'string' then
-    local message = err:match('^[^:]+:[^:]+:(.+)') or err
-    message = message:gsub('^%s*', '')
-    err = message
+    while true do
+      local new_err = err:gsub('^[^:]+:%d+: ', '')
+      if new_err == err then
+        break
+      end
+      err = new_err
+    end
   else
     err = utils.make_string(err)
   end
@@ -610,7 +637,7 @@ function M.ask(prompt, config)
     return
   end
 
-  vim.diagnostic.reset(vim.api.nvim_create_namespace('copilot_diagnostics'))
+  vim.diagnostic.reset(vim.api.nvim_create_namespace('copilot-chat-diagnostics'))
   config = vim.tbl_deep_extend('force', state.chat.config, config or {})
   config = vim.tbl_deep_extend('force', M.config, config or {})
 
@@ -639,9 +666,6 @@ function M.ask(prompt, config)
     '\n'
   ))
 
-  -- Retrieve the history
-  local history = config.headless and {} or state.chat:parse_history()
-
   -- Retrieve the selection
   local selection = M.get_selection(config)
 
@@ -652,7 +676,7 @@ function M.ask(prompt, config)
 
     local has_output = false
     local query_ok, filtered_embeddings =
-      pcall(context.filter_embeddings, prompt, selected_model, embeddings)
+      pcall(context.filter_embeddings, prompt, selected_model, config.headless, embeddings)
 
     if not query_ok then
       async.util.scheduler()
@@ -665,7 +689,7 @@ function M.ask(prompt, config)
 
     local ask_ok, response, references, token_count, token_max_count =
       pcall(client.ask, client, prompt, {
-        history = history,
+        headless = config.headless,
         selection = selection,
         embeddings = filtered_embeddings,
         system_prompt = system_prompt,
@@ -725,6 +749,14 @@ function M.stop(reset)
     state.chat:clear()
     state.last_prompt = nil
     state.last_response = nil
+
+    -- Clear the selection
+    if state.source and utils.buf_valid(state.source.bufnr) then
+      for _, mark in ipairs({ '<', '>', '[', ']' }) do
+        pcall(vim.api.nvim_buf_del_mark, state.source.bufnr, mark)
+      end
+      highlight_selection(true, state.chat.config)
+    end
   else
     client:stop()
   end
@@ -752,7 +784,7 @@ function M.save(name, history_path)
     return
   end
 
-  local history = vim.json.encode(state.chat:parse_history())
+  local history = vim.json.encode(client.history)
   history_path = vim.fn.expand(history_path)
   vim.fn.mkdir(history_path, 'p')
   history_path = history_path .. '/' .. name .. '.json'
@@ -829,47 +861,6 @@ end
 --- Set up the plugin
 ---@param config CopilotChat.config?
 function M.setup(config)
-  -- Handle changed configuration
-  if config then
-    if config.mappings then
-      for name, key in pairs(config.mappings) do
-        if type(key) == 'string' then
-          utils.deprecate(
-            'config.mappings.' .. name,
-            'config.mappings.' .. name .. '.normal and config.mappings.' .. name .. '.insert'
-          )
-
-          config.mappings[name] = {
-            normal = key,
-          }
-        end
-
-        if name == 'show_system_prompt' then
-          utils.deprecate('config.mappings.' .. name, 'config.mappings.show_info')
-        end
-
-        if name == 'show_user_context' or name == 'show_user_selection' then
-          utils.deprecate('config.mappings.' .. name, 'config.mappings.show_context')
-        end
-      end
-    end
-
-    if config['yank_diff_register'] then
-      utils.deprecate('config.yank_diff_register', 'config.mappings.yank_diff.register')
-      config.mappings.yank_diff.register = config['yank_diff_register']
-    end
-  end
-
-  -- Handle removed commands
-  vim.api.nvim_create_user_command('CopilotChatFixDiagnostic', function()
-    utils.deprecate('CopilotChatFixDiagnostic', 'CopilotChatFix')
-    M.ask('/Fix')
-  end, { force = true })
-  vim.api.nvim_create_user_command('CopilotChatCommitStaged', function()
-    utils.deprecate('CopilotChatCommitStaged', 'CopilotChatCommit')
-    M.ask('/Commit')
-  end, { force = true })
-
   M.config = vim.tbl_deep_extend('force', require('CopilotChat.config'), config or {})
 
   -- Save proxy and insecure settings
@@ -888,8 +879,10 @@ function M.setup(config)
     M.log_level(M.config.log_level)
   end
 
-  vim.api.nvim_set_hl(0, 'CopilotChatSpinner', { link = 'DiagnosticInfo', default = true })
+  vim.api.nvim_set_hl(0, 'CopilotChatStatus', { link = 'DiagnosticHint', default = true })
   vim.api.nvim_set_hl(0, 'CopilotChatHelp', { link = 'DiagnosticInfo', default = true })
+  vim.api.nvim_set_hl(0, 'CopilotChatKeyword', { link = 'Keyword', default = true })
+  vim.api.nvim_set_hl(0, 'CopilotChatInput', { link = 'Special', default = true })
   vim.api.nvim_set_hl(0, 'CopilotChatSelection', { link = 'Visual', default = true })
   vim.api.nvim_set_hl(
     0,
@@ -901,6 +894,8 @@ function M.setup(config)
     'CopilotChatSeparator',
     { link = '@punctuation.special.markdown', default = true }
   )
+
+  state.highlights_loaded = false
 
   local overlay_help = utils.key_to_info('close', M.config.mappings.close)
   if state.overlay then
@@ -941,6 +936,7 @@ function M.setup(config)
           local is_enter = ev.event == 'BufEnter'
 
           if is_enter then
+            update_highlights()
             M.update_selection(state.chat.config)
           else
             highlight_selection(true, state.chat.config)

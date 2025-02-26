@@ -1,5 +1,5 @@
 ---@class CopilotChat.Client.ask
----@field history table
+---@field headless boolean
 ---@field selection CopilotChat.select.selection?
 ---@field embeddings table<CopilotChat.context.embed>?
 ---@field system_prompt string
@@ -20,7 +20,6 @@ local tiktoken = require('CopilotChat.tiktoken')
 local notify = require('CopilotChat.notify')
 local utils = require('CopilotChat.utils')
 local class = utils.class
-local temp_file = utils.temp_file
 
 --- Constants
 local CONTEXT_FORMAT = '[#file:%s](#file:%s-context)'
@@ -242,17 +241,17 @@ local function generate_embedding_request(inputs, threshold)
 end
 
 ---@class CopilotChat.Client : Class
+---@field history table<CopilotChat.Provider.input>
 ---@field providers table<string, CopilotChat.Provider>
 ---@field provider_cache table<string, table>
----@field embedding_cache table<string, CopilotChat.context.embed>
 ---@field models table<string, CopilotChat.Client.model>?
 ---@field agents table<string, CopilotChat.Client.agent>?
 ---@field current_job string?
 ---@field headers table<string, string>?
 local Client = class(function(self)
+  self.history = {}
   self.providers = {}
   self.provider_cache = {}
-  self.embedding_cache = {}
   self.models = nil
   self.agents = nil
   self.current_job = nil
@@ -267,18 +266,15 @@ function Client:authenticate(provider_name)
   local headers = self.provider_cache[provider_name].headers
   local expires_at = self.provider_cache[provider_name].expires_at
 
-  if not headers or (expires_at and expires_at <= math.floor(os.time())) then
-    local token
-    if provider.get_token then
-      token, expires_at = provider.get_token()
-    end
-
-    headers = provider.get_headers(token)
+  if
+    provider.get_headers and (not headers or (expires_at and expires_at <= math.floor(os.time())))
+  then
+    headers, expires_at = provider.get_headers()
     self.provider_cache[provider_name].headers = headers
     self.provider_cache[provider_name].expires_at = expires_at
   end
 
-  return headers
+  return headers or {}
 end
 
 --- Fetch models from the Copilot API
@@ -367,7 +363,7 @@ function Client:ask(prompt, opts)
     opts.agent = nil
   end
 
-  local history = opts.history or {}
+  local history = opts.headless and {} or self.history
   local embeddings = opts.embeddings or {}
   local selection = opts.selection or {}
   local system_prompt = vim.trim(opts.system_prompt)
@@ -487,6 +483,9 @@ function Client:ask(prompt, opts)
     end
   else
     -- Add all embedding messages as we cant limit them
+    for _, message in ipairs(selection_messages) do
+      table.insert(generated_messages, message)
+    end
     for _, message in ipairs(embeddings_messages) do
       table.insert(generated_messages, message)
     end
@@ -507,7 +506,10 @@ function Client:ask(prompt, opts)
 
     log.debug('Finishing stream', err)
     finished = true
-    job:shutdown(0)
+
+    if job then
+      job:shutdown(0)
+    end
   end
 
   local function parse_line(line, job)
@@ -518,38 +520,33 @@ function Client:ask(prompt, opts)
     log.debug('Response line: ', line)
     notify.publish(notify.STATUS, '')
 
-    local ok, content = pcall(vim.json.decode, line, {
-      luanil = {
-        object = true,
-        array = true,
-      },
-    })
+    local content, err = utils.json_decode(line)
 
-    if not ok then
-      if job then
-        finish_stream(
-          'Failed to parse response: ' .. utils.make_string(content) .. '\n' .. line,
-          job
-        )
-      end
+    if err then
+      finish_stream(line, job)
+      return
+    end
+
+    if type(content) ~= 'table' then
+      finish_stream(content, job)
       return
     end
 
     local out = provider.prepare_output(content, options)
+    last_message = out
+
     if out.references then
       for _, reference in ipairs(out.references) do
         table.insert(references, reference)
       end
     end
 
-    last_message = out
-
     if out.content then
       full_response = full_response .. out.content
       on_progress(out.content)
     end
 
-    if job and out.finish_reason then
+    if out.finish_reason then
       local reason = out.finish_reason
       if reason == 'stop' then
         reason = nil
@@ -562,13 +559,16 @@ function Client:ask(prompt, opts)
 
   local function parse_stream_line(line, job)
     line = vim.trim(line)
+
+    if vim.startswith(line, 'event:') then
+      return
+    end
+
     line = line:gsub('^data:', '')
     line = vim.trim(line)
 
     if line == '[DONE]' then
-      if job then
-        finish_stream(nil, job)
-      end
+      finish_stream(nil, job)
       return
     end
 
@@ -586,7 +586,7 @@ function Client:ask(prompt, opts)
     end
 
     if err then
-      finish_stream('Failed to get response: ' .. utils.make_string(err and err or line), job)
+      finish_stream(err and err or line, job)
       return
     end
 
@@ -601,13 +601,12 @@ function Client:ask(prompt, opts)
     options
   )
   local is_stream = request.stream
-  local body = vim.json.encode(request)
 
   local args = {
-    body = temp_file(body),
+    json_request = true,
+    body = request,
     headers = headers,
   }
-
   if is_stream then
     args.stream = stream_func
   end
@@ -620,41 +619,28 @@ function Client:ask(prompt, opts)
 
   self.current_job = nil
 
-  if err then
-    error(err)
-    return
-  end
-
-  if not response then
-    error('Failed to get response')
-    return
-  end
-
   log.debug('Response status: ', response.status)
   log.debug('Response body: ', response.body)
   log.debug('Response headers: ', response.headers)
 
-  if response.status ~= 200 then
-    if response.status == 401 then
-      local ok, content = pcall(vim.json.decode, response.body, {
-        luanil = {
-          object = true,
-          array = true,
-        },
-      })
+  if err then
+    local error_msg = 'Failed to get response: ' .. err
 
-      if ok and content.authorize_url then
-        error(
-          'Failed to authenticate. Visit following url to authorize '
+    if response then
+      if response.status == 401 then
+        local content = utils.json_decode(response.body)
+        if content.authorize_url then
+          error_msg = 'Failed to authenticate. Visit following url to authorize '
             .. content.slug
             .. ':\n'
             .. content.authorize_url
-        )
-        return
+        end
+      else
+        error_msg = 'Failed to get response: ' .. tostring(response.status) .. '\n' .. response.body
       end
     end
 
-    error('Failed to get response: ' .. tostring(response.status) .. '\n' .. response.body)
+    error(error_msg)
     return
   end
 
@@ -664,7 +650,7 @@ function Client:ask(prompt, opts)
   end
 
   if is_stream then
-    if not full_response then
+    if utils.empty(full_response) then
       for _, line in ipairs(vim.split(response.body, '\n')) do
         parse_stream_line(line)
       end
@@ -673,13 +659,28 @@ function Client:ask(prompt, opts)
     parse_line(response.body)
   end
 
-  if not full_response then
+  if utils.empty(full_response) then
     error('Failed to get response: empty response')
     return
   end
 
   log.trace('Full response: ', full_response)
   log.debug('Last message: ', last_message)
+
+  if not opts.headless then
+    table.insert(history, {
+      content = prompt,
+      role = 'user',
+    })
+
+    table.insert(history, {
+      content = full_response,
+      role = 'assistant',
+    })
+
+    self.history = history
+    log.debug('History size increased to: ', #history)
+  end
 
   return full_response, references, last_message and last_message.total_tokens or 0, max_tokens
 end
@@ -746,29 +747,15 @@ function Client:embed(inputs, model)
   notify.publish(notify.STATUS, 'Generating embeddings for ' .. #inputs .. ' inputs')
 
   -- Initialize essentials
-  local to_process = {}
+  local to_process = inputs
   local results = {}
   local initial_chunk_size = 10
-
-  -- Process each input, using cache when possible
-  for _, input in ipairs(inputs) do
-    input.filename = input.filename or 'unknown'
-    input.filetype = input.filetype or 'text'
-
-    if input.content then
-      local cache_key = input.filename .. utils.quick_hash(input.content)
-      if self.embedding_cache[cache_key] then
-        table.insert(results, self.embedding_cache[cache_key])
-      else
-        table.insert(to_process, input)
-      end
-    end
-  end
 
   -- Process inputs in batches with adaptive chunk size
   while #to_process > 0 do
     local chunk_size = initial_chunk_size -- Reset chunk size for each new batch
     local threshold = BIG_EMBED_THRESHOLD -- Reset threshold for each new batch
+    local last_error = nil
 
     -- Take next chunk
     local batch = {}
@@ -785,6 +772,7 @@ function Client:embed(inputs, model)
 
       if not ok then
         log.debug('Failed to get embeddings: ', data)
+        last_error = data
         attempts = attempts + 1
         -- If we have few items and the request failed, try reducing threshold first
         if #batch <= 5 then
@@ -809,15 +797,12 @@ function Client:embed(inputs, model)
         for _, embedding in ipairs(data) do
           local result = vim.tbl_extend('force', batch[embedding.index + 1], embedding)
           table.insert(results, result)
-
-          local cache_key = result.filename .. utils.quick_hash(result.content)
-          self.embedding_cache[cache_key] = result
         end
       end
     end
 
     if not success then
-      error('Failed to process embeddings after multiple attempts')
+      error(last_error)
     end
   end
 
@@ -840,7 +825,6 @@ end
 function Client:reset()
   local stopped = self:stop()
   self.history = {}
-  self.embedding_cache = {}
   return stopped
 end
 

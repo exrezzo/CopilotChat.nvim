@@ -39,6 +39,7 @@ return {
       }
     end,
   },
+
   buffers = {
     description = 'Includes all buffers in chat context. Supports input (default listed).',
     input = function(callback)
@@ -51,6 +52,7 @@ return {
       return context.buffers(input)
     end,
   },
+
   file = {
     description = 'Includes content of provided file in chat context. Supports input.',
     input = function(callback, source)
@@ -72,27 +74,35 @@ return {
       }
     end,
   },
-  files = {
-    description = 'Includes all non-hidden files in the current workspace in chat context. Supports input (default list).',
-    input = function(callback)
-      local choices = utils.kv_list({
-        list = 'Only lists file names',
-        full = 'Includes file content for each file found, up to a limit.',
-      })
 
-      vim.ui.select(choices, {
-        prompt = 'Select files content> ',
-        format_item = function(choice)
-          return choice.key .. ' - ' .. choice.value
-        end,
-      }, function(choice)
-        callback(choice and choice.key)
-      end)
+  files = {
+    description = 'Includes all non-hidden files in the current workspace in chat context. Supports input (glob pattern).',
+    input = function(callback)
+      vim.ui.input({
+        prompt = 'Enter glob> ',
+      }, callback)
     end,
     resolve = function(input, source)
-      return context.files(source.winnr, input == 'full')
+      return context.files(source.winnr, true, {
+        search_pattern = input and utils.glob_to_regex(input),
+      })
     end,
   },
+
+  filenames = {
+    description = 'Includes names of all non-hidden files in the current workspace in chat context. Supports input (glob pattern).',
+    input = function(callback)
+      vim.ui.input({
+        prompt = 'Enter glob> ',
+      }, callback)
+    end,
+    resolve = function(input, source)
+      return context.files(source.winnr, false, {
+        search_pattern = input and utils.glob_to_regex(input),
+      })
+    end,
+  },
+
   git = {
     description = 'Requires `git`. Includes current git diff in chat context. Supports input (default unstaged, also accepts commit number).',
     input = function(callback)
@@ -107,6 +117,7 @@ return {
       }
     end,
   },
+
   url = {
     description = 'Includes content of provided URL in chat context. Supports input.',
     input = function(callback)
@@ -121,6 +132,7 @@ return {
       }
     end,
   },
+
   register = {
     description = 'Includes contents of register in chat context. Supports input (default +, e.g clipboard).',
     input = function(callback)
@@ -154,6 +166,7 @@ return {
       }
     end,
   },
+
   quickfix = {
     description = 'Includes quickfix list file contents in chat context.',
     resolve = function()

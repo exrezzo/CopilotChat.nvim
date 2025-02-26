@@ -19,14 +19,19 @@ The user is working on a %s machine. Please respond with system specific command
 
 local COPILOT_INSTRUCTIONS = [[
 You are a code-focused AI programming assistant that specializes in practical software engineering solutions.
+You will receive code snippets that include line number prefixes - use these to maintain correct position references but remove them when generating output.
 ]] .. base
 
 local COPILOT_EXPLAIN = [[
 You are a programming instructor focused on clear, practical explanations.
 When explaining code:
-- Balance high-level concepts with implementation details
-- Highlight key programming principles and patterns
-- Address any code diagnostics or warnings
+- Provide concise high-level overview first
+- Highlight non-obvious implementation details
+- Identify patterns and programming principles
+- Address any existing diagnostics or warnings
+- Focus on complex parts rather than basic syntax
+- Use short paragraphs with clear structure
+- Mention performance considerations where relevant
 ]] .. base
 
 local COPILOT_REVIEW = COPILOT_INSTRUCTIONS
@@ -39,44 +44,46 @@ Check for:
 - Unclear or non-conventional naming
 - Comment quality (missing or unnecessary)
 - Complex expressions needing simplification
-- Deep nesting
-- Inconsistent style
-- Code duplication
+- Deep nesting or complex control flow
+- Inconsistent style or formatting
+- Code duplication or redundancy
+- Potential performance issues
+- Error handling gaps
+- Security concerns
+- Breaking of SOLID principles
 
 Multiple issues on one line should be separated by semicolons.
 End with: "**`To clear buffer highlights, please ask a different question.`**"
 
-If no issues found, confirm the code is well-written.
+If no issues found, confirm the code is well-written and explain why.
 ]]
 
 local COPILOT_GENERATE = COPILOT_INSTRUCTIONS
   .. [[
-Your task is to modify the provided code according to the user's request. Follow these instructions precisely:
+Your task is to modify the provided code according to the user's request.
 
-1. Split your response into minimal, focused code changes to produce the shortest possible diffs.
+When presenting code changes:
 
-2. IMPORTANT: Every code block MUST have a header with this exact format:
+1. For each change, first provide a header outside code blocks with format:
    [file:<file_name>](<file_path>) line:<start_line>-<end_line>
-   The line numbers are REQUIRED - never omit them.
 
-3. Return ONLY the modified code blocks - no explanations or comments.
+2. Then wrap the actual code in triple backticks with the appropriate language identifier.
 
-4. Each code block should contain:
-   - Only the specific lines that need to change
-   - Exact indentation matching the source
-   - Complete code that can directly replace the original
+3. Keep changes minimal and focused to produce short diffs.
 
-5. When fixing code, check and address any diagnostics issues.
+4. Include complete replacement code for the specified line range with:
+   - Proper indentation matching the source
+   - All necessary lines (no eliding with comments)
+   - No line number prefixes in the code
 
-6. If multiple separate changes are needed, split them into individual blocks with appropriate headers.
+5. Address any diagnostics issues when fixing code.
 
-7. If response would be too long:
-   - Never cut off in the middle of a code block
+6. If multiple changes are needed, present them as separate blocks with their own headers.
+
+7. For long responses:
    - Complete the current code block
    - End with "**`[Response truncated] Please ask for the remaining changes.`**"
-   - Next response should continue with the next code block
-
-Remember: Your response should ONLY contain file headers with line numbers and code blocks for direct replacement.
+   - Continue in the next response
 ]]
 
 ---@type table<string, CopilotChat.config.prompt>
@@ -84,18 +91,23 @@ return {
   COPILOT_INSTRUCTIONS = {
     system_prompt = COPILOT_INSTRUCTIONS,
   },
+
   COPILOT_EXPLAIN = {
     system_prompt = COPILOT_EXPLAIN,
   },
+
   COPILOT_REVIEW = {
     system_prompt = COPILOT_REVIEW,
   },
+
   COPILOT_GENERATE = {
     system_prompt = COPILOT_GENERATE,
   },
+
   Explain = {
     prompt = '> /COPILOT_EXPLAIN\n\nWrite an explanation for the selected code as paragraphs of text.',
   },
+
   Review = {
     prompt = '> /COPILOT_REVIEW\n\nReview the selected code.',
     callback = function(response, source)
@@ -132,25 +144,30 @@ return {
         end
       end
       vim.diagnostic.set(
-        vim.api.nvim_create_namespace('copilot_diagnostics'),
+        vim.api.nvim_create_namespace('copilot-chat-diagnostics'),
         source.bufnr,
         diagnostics
       )
     end,
   },
+
   Fix = {
     prompt = '> /COPILOT_GENERATE\n\nThere is a problem in this code. Rewrite the code to show it with the bug fixed.',
   },
+
   Optimize = {
     prompt = '> /COPILOT_GENERATE\n\nOptimize the selected code to improve performance and readability.',
   },
+
   Docs = {
     prompt = '> /COPILOT_GENERATE\n\nPlease add documentation comments to the selected code.',
   },
+
   Tests = {
     prompt = '> /COPILOT_GENERATE\n\nPlease generate tests for my code.',
   },
+
   Commit = {
-    prompt = '> #git:staged\n\nWrite commit message for the change with commitizen convention. Make sure the title has maximum 50 characters and message is wrapped at 72 characters. Wrap the whole message in code block with language gitcommit.',
+    prompt = '> #git:staged\n\nWrite commit message for the change with commitizen convention. Keep the title under 50 characters and wrap message at 72 characters. Format as a gitcommit code block.',
   },
 }

@@ -23,6 +23,7 @@ local notify = require('CopilotChat.notify')
 local utils = require('CopilotChat.utils')
 local file_cache = {}
 local url_cache = {}
+local embedding_cache = {}
 
 local M = {}
 
@@ -369,18 +370,22 @@ end
 
 --- Get list of all files in workspace
 ---@param winnr number?
----@param with_content boolean
+---@param with_content boolean?
+---@param search_options table?
 ---@return table<CopilotChat.context.embed>
-function M.files(winnr, with_content)
+function M.files(winnr, with_content, search_options)
   local cwd = utils.win_cwd(winnr)
 
   notify.publish(notify.STATUS, 'Scanning files')
 
-  local files = utils.scan_dir(cwd, {
-    add_dirs = false,
-    respect_gitignore = true,
-    max_files = MAX_FILES,
-  })
+  local files = utils.scan_dir(
+    cwd,
+    vim.tbl_extend('force', {
+      add_dirs = false,
+      respect_gitignore = true,
+      max_files = MAX_FILES,
+    }, search_options)
+  )
 
   notify.publish(notify.STATUS, 'Reading files')
 
@@ -401,11 +406,11 @@ function M.files(winnr, with_content)
       content = table.concat(chunk, '\n'),
       filename = chunk_name,
       filetype = 'text',
-      score = 0.2, -- Score bonus
+      score = 0.1,
     })
   end
 
-  -- Read all files if we want content as well
+  -- Read file contents
   if with_content then
     async.util.scheduler()
 
@@ -526,11 +531,14 @@ function M.buffer(bufnr)
     return nil
   end
 
-  return build_outline(
+  local out = build_outline(
     table.concat(content, '\n'),
     utils.filepath(vim.api.nvim_buf_get_name(bufnr)),
     vim.bo[bufnr].filetype
   )
+
+  out.score = 0.1
+  return out
 end
 
 --- Get content of all buffers
@@ -704,9 +712,10 @@ end
 --- Filter embeddings based on the query
 ---@param prompt string
 ---@param model string
+---@param headless boolean
 ---@param embeddings table<CopilotChat.context.embed>
 ---@return table<CopilotChat.context.embed>
-function M.filter_embeddings(prompt, model, embeddings)
+function M.filter_embeddings(prompt, model, headless, embeddings)
   -- If we dont need to embed anything, just return directly
   if #embeddings < MULTI_FILE_THRESHOLD then
     return embeddings
@@ -714,33 +723,70 @@ function M.filter_embeddings(prompt, model, embeddings)
 
   notify.publish(notify.STATUS, 'Ranking embeddings')
 
+  -- Build query from history and prompt
+  local query = prompt
+  if not headless then
+    query = table.concat(
+      vim
+        .iter(client.history)
+        :filter(function(m)
+          return m.role == 'user'
+        end)
+        :map(function(m)
+          return vim.trim(m.content)
+        end)
+        :totable(),
+      '\n'
+    ) .. '\n' .. prompt
+  end
+
   -- Rank embeddings by symbols
-  embeddings = data_ranked_by_symbols(prompt, embeddings, MIN_SYMBOL_SIMILARITY)
+  embeddings = data_ranked_by_symbols(query, embeddings, MIN_SYMBOL_SIMILARITY)
   log.debug('Ranked data:', #embeddings)
   for i, item in ipairs(embeddings) do
     log.debug(string.format('%s: %s - %s', i, item.score, item.filename))
   end
 
-  -- Add prompt so it can be embedded
-  table.insert(embeddings, {
-    content = prompt,
-    filename = 'prompt',
+  -- Prepare embeddings for processing
+  local to_process = {}
+  local results = {}
+  for _, input in ipairs(embeddings) do
+    input.filename = input.filename or 'unknown'
+    input.filetype = input.filetype or 'text'
+    if input.content then
+      local cache_key = input.filename .. utils.quick_hash(input.content)
+      if embedding_cache[cache_key] then
+        table.insert(results, embedding_cache[cache_key])
+      else
+        table.insert(to_process, input)
+      end
+    end
+  end
+  table.insert(to_process, {
+    content = query,
+    filename = 'query',
     filetype = 'raw',
   })
 
-  -- Get embeddings from all items
-  embeddings = client:embed(embeddings, model)
+  -- Embed the data and process the results
+  for _, input in ipairs(client:embed(to_process, model)) do
+    if input.filetype ~= 'raw' then
+      local cache_key = input.filename .. utils.quick_hash(input.content)
+      embedding_cache[cache_key] = input
+    end
+    table.insert(results, input)
+  end
 
   -- Rate embeddings by relatedness to the query
-  local embedded_query = table.remove(embeddings, #embeddings)
+  local embedded_query = table.remove(results, #results)
   log.debug('Embedded query:', embedded_query.content)
-  embeddings = data_ranked_by_relatedness(embedded_query, embeddings, MIN_SEMANTIC_SIMILARITY)
-  log.debug('Ranked embeddings:', #embeddings)
-  for i, item in ipairs(embeddings) do
+  results = data_ranked_by_relatedness(embedded_query, results, MIN_SEMANTIC_SIMILARITY)
+  log.debug('Ranked embeddings:', #results)
+  for i, item in ipairs(results) do
     log.debug(string.format('%s: %s - %s', i, item.score, item.filename))
   end
 
-  return embeddings
+  return results
 end
 
 return M

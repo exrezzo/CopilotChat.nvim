@@ -39,8 +39,7 @@ local utils = require('CopilotChat.utils')
 
 ---@class CopilotChat.Provider
 ---@field disabled nil|boolean
----@field get_headers fun(token:string):table<string, string>
----@field get_token nil|fun():string,number?
+---@field get_headers nil|fun():table<string, string>,number?
 ---@field get_agents nil|fun(headers:table):table<CopilotChat.Provider.agent>
 ---@field get_models nil|fun(headers:table):table<CopilotChat.Provider.model>
 ---@field embed nil|string|fun(inputs:table<string>, headers:table):table<CopilotChat.Provider.embed>
@@ -107,21 +106,11 @@ local M = {}
 M.copilot = {
   embed = 'copilot_embeddings',
 
-  get_headers = function(token)
-    return {
-      ['authorization'] = 'Bearer ' .. token,
-      ['editor-version'] = EDITOR_VERSION,
-      ['editor-plugin-version'] = 'CopilotChat.nvim/*',
-      ['copilot-integration-id'] = 'vscode-chat',
-      ['content-type'] = 'application/json',
-    }
-  end,
-
-  get_token = function()
+  get_headers = function()
     local response, err = utils.curl_get('https://api.github.com/copilot_internal/v2/token', {
+      json_response = true,
       headers = {
         ['Authorization'] = 'Token ' .. get_github_token(),
-        ['Accept'] = 'application/json',
       },
     })
 
@@ -129,16 +118,18 @@ M.copilot = {
       error(err)
     end
 
-    if response.status ~= 200 then
-      error('Failed to authenticate: ' .. tostring(response.status))
-    end
-
-    local body = vim.json.decode(response.body)
-    return body.token, body.expires_at
+    return {
+      ['Authorization'] = 'Bearer ' .. response.body.token,
+      ['Editor-Version'] = EDITOR_VERSION,
+      ['Editor-Plugin-Version'] = 'CopilotChat.nvim/*',
+      ['Copilot-Integration-Id'] = 'vscode-chat',
+    },
+      response.body.expires_at
   end,
 
   get_agents = function(headers)
     local response, err = utils.curl_get('https://api.githubcopilot.com/agents', {
+      json_response = true,
       headers = headers,
     })
 
@@ -146,25 +137,18 @@ M.copilot = {
       error(err)
     end
 
-    if response.status ~= 200 then
-      error('Failed to fetch agents: ' .. tostring(response.status))
-    end
-
-    local agents = vim.json.decode(response.body)['agents']
-    local out = {}
-    for _, agent in ipairs(agents) do
-      table.insert(out, {
+    return vim.tbl_map(function(agent)
+      return {
         id = agent.slug,
         name = agent.name,
         description = agent.description,
-      })
-    end
-
-    return out
+      }
+    end, response.body.agents)
   end,
 
   get_models = function(headers)
     local response, err = utils.curl_get('https://api.githubcopilot.com/models', {
+      json_response = true,
       headers = headers,
     })
 
@@ -172,14 +156,13 @@ M.copilot = {
       error(err)
     end
 
-    if response.status ~= 200 then
-      error('Failed to fetch models: ' .. tostring(response.status))
-    end
-
-    local models = {}
-    for _, model in ipairs(vim.json.decode(response.body).data) do
-      if model['capabilities']['type'] == 'chat' then
-        table.insert(models, {
+    local models = vim
+      .iter(response.body.data)
+      :filter(function(model)
+        return model['capabilities']['type'] == 'chat'
+      end)
+      :map(function(model)
+        return {
           id = model.id,
           name = model.name,
           version = model.version,
@@ -187,15 +170,16 @@ M.copilot = {
           max_input_tokens = model.capabilities.limits.max_prompt_tokens,
           max_output_tokens = model.capabilities.limits.max_output_tokens,
           policy = not model['policy'] or model['policy']['state'] == 'enabled',
-        })
-      end
-    end
+        }
+      end)
+      :totable()
 
     for _, model in ipairs(models) do
       if not model.policy then
         utils.curl_post('https://api.githubcopilot.com/models/' .. model.id .. '/policy', {
           headers = headers,
-          body = vim.json.encode({ state = 'enabled' }),
+          json_request = true,
+          body = { state = 'enabled' },
         })
       end
     end
@@ -219,13 +203,13 @@ M.copilot = {
     local out = {
       messages = inputs,
       model = opts.model.id,
-      stream = not is_o1,
-      n = 1,
     }
 
     if not is_o1 then
-      out.temperature = opts.temperature
+      out.n = 1
       out.top_p = 1
+      out.stream = true
+      out.temperature = opts.temperature
     end
 
     if opts.model.max_output_tokens then
@@ -260,10 +244,18 @@ M.copilot = {
     local content = message.message and message.message.content
       or message.delta and message.delta.content
 
+    local usage = message.usage and message.usage.total_tokens
+      or output.usage and output.usage.total_tokens
+
+    local finish_reason = message.finish_reason
+      or message.done_reason
+      or output.finish_reason
+      or output.done_reason
+
     return {
       content = content,
-      finish_reason = message.finish_reason or message.done_reason,
-      total_tokens = message.usage and message.usage.total_tokens,
+      finish_reason = finish_reason,
+      total_tokens = usage,
       references = references,
     }
   end,
@@ -280,54 +272,51 @@ M.copilot = {
 M.github_models = {
   embed = 'copilot_embeddings',
 
-  get_headers = function(token)
+  get_headers = function()
     return {
-      ['Authorization'] = 'Bearer ' .. token,
-      ['Content-Type'] = 'application/json',
+      ['Authorization'] = 'Bearer ' .. get_github_token(),
       ['x-ms-useragent'] = EDITOR_VERSION,
       ['x-ms-user-agent'] = EDITOR_VERSION,
     }
   end,
 
-  get_token = function()
-    return get_github_token(), nil
-  end,
-
   get_models = function(headers)
-    local response = utils.curl_post('https://api.catalog.azureml.ms/asset-gallery/v1.0/models', {
-      headers = headers,
-      body = [[
-        {
-          "filters": [
-            { "field": "freePlayground", "values": ["true"], "operator": "eq"},
-            { "field": "labels", "values": ["latest"], "operator": "eq"}
-          ],
-          "order": [
-            { "field": "displayName", "direction": "asc" }
-          ]
-        }
-      ]],
-    })
+    local response, err =
+      utils.curl_post('https://api.catalog.azureml.ms/asset-gallery/v1.0/models', {
+        headers = headers,
+        json_request = true,
+        json_response = true,
+        body = {
+          filters = {
+            { field = 'freePlayground', values = { 'true' }, operator = 'eq' },
+            { field = 'labels', values = { 'latest' }, operator = 'eq' },
+          },
+          order = {
+            { field = 'displayName', direction = 'asc' },
+          },
+        },
+      })
 
-    if not response or response.status ~= 200 then
-      error('Failed to fetch models: ' .. tostring(response and response.status))
+    if err then
+      error(err)
     end
 
-    local models = {}
-    for _, model in ipairs(vim.json.decode(response.body)['summaries']) do
-      if vim.tbl_contains(model.inferenceTasks, 'chat-completion') then
-        table.insert(models, {
+    return vim
+      .iter(response.body.summaries)
+      :filter(function(model)
+        return vim.tbl_contains(model.inferenceTasks, 'chat-completion')
+      end)
+      :map(function(model)
+        return {
           id = model.name,
           name = model.displayName,
           version = model.name .. '-' .. model.version,
           tokenizer = 'o200k_base',
           max_input_tokens = model.modelLimits.textLimits.inputContextWindow,
           max_output_tokens = model.modelLimits.textLimits.maxOutputTokens,
-        })
-      end
-    end
-
-    return models
+        }
+      end)
+      :totable()
   end,
 
   prepare_input = M.copilot.prepare_input,
@@ -340,23 +329,24 @@ M.github_models = {
 
 M.copilot_embeddings = {
   get_headers = M.copilot.get_headers,
-  get_token = M.copilot.get_token,
 
   embed = function(inputs, headers)
-    local response = utils.curl_post('https://api.githubcopilot.com/embeddings', {
+    local response, err = utils.curl_post('https://api.githubcopilot.com/embeddings', {
       headers = headers,
-      body = utils.temp_file(vim.json.encode({
+      json_request = true,
+      json_response = true,
+      body = {
         dimensions = 512,
         input = inputs,
         model = 'text-embedding-3-small',
-      })),
+      },
     })
 
-    if not response or response.status ~= 200 then
-      error('Failed to embed text: ' .. tostring(response and response.status))
+    if err then
+      error(err)
     end
 
-    return vim.json.decode(response.body).data
+    return response.body.data
   end,
 }
 

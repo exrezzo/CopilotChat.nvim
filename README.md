@@ -16,24 +16,42 @@ https://github.com/user-attachments/assets/8cad5643-63b2-4641-a5c4-68bc313f20e6
 
 </div>
 
+CopilotChat.nvim is a Neovim plugin that brings GitHub Copilot Chat capabilities directly into your editor. It provides:
+
+- 🤖 Native GitHub Copilot Chat integration with official model and agent support (GPT-4o, Claude 3.7 Sonnet, Gemini 2.0 Flash, and more)
+- 💻 Rich workspace context powered by smart embeddings system
+- 🔒 Explicit context sharing - only sends what you specifically request, either as context or selection
+- 🔌 Modular provider architecture supporting both official and custom LLM backends (Ollama, LM Studio, and more)
+- 📝 Interactive chat UI with completion, diffs and quickfix integration
+- 🎯 Powerful prompt system with composable templates and sticky prompts
+- 🔄 Extensible context providers for granular workspace understanding (buffers, files, git diffs, URLs, and more)
+- ⚡ Efficient token usage with tiktoken optimization
+
 # Requirements
 
 - [Neovim 0.10.0+](https://neovim.io/) - Older versions are not officially supported
-- [curl](https://curl.se/) - 8.0.0+ is recommended for best compatibility. Should be installed by default on most systems and also shipped with Neovim
-- [Copilot chat in the IDE](https://github.com/settings/copilot) setting enabled in GitHub settings
-- _Optional_ [tiktoken_core](https://github.com/gptlang/lua-tiktoken) - Used for more accurate token counting
-  - For Arch Linux users, you can install [`luajit-tiktoken-bin`](https://aur.archlinux.org/packages/luajit-tiktoken-bin) or [`lua51-tiktoken-bin`](https://aur.archlinux.org/packages/lua51-tiktoken-bin) from aur
-  - Alternatively, install via luarocks: `sudo luarocks install --lua-version 5.1 tiktoken_core`
-  - Alternatively, download a pre-built binary from [lua-tiktoken releases](https://github.com/gptlang/lua-tiktoken/releases). You can check your Lua PATH in Neovim by doing `:lua print(package.cpath)`. Save the binary as `tiktoken_core.so` in any of the given paths.
-- _Optional_ [git](https://git-scm.com/) - Used for fetching git diffs for `git` context
-  - For Arch Linux users, you can install [`git`](https://archlinux.org/packages/extra/x86_64/git) from the official repositories
-  - For other systems, use your package manager to install `git`. For windows use the installer provided from git site
-- _Optional_ [lynx](https://lynx.invisible-island.net/) - Used for improved fetching of URLs for `url` context
-  - For Arch Linux users, you can install [`lynx`](https://archlinux.org/packages/extra/x86_64/lynx) from the official repositories
-  - For other systems, use your package manager to install `lynx`. For windows use the installer provided from lynx site
+- [curl](https://curl.se/) - Version 8.0.0+ recommended for best compatibility
+- [Copilot chat in the IDE](https://github.com/settings/copilot) enabled in GitHub settings
 
-> [!WARNING]
-> If you are on neovim < 0.11.0, you also might want to add `noinsert` and `popup` to your `completeopt` to make the chat completion behave well.
+> [!NOTE]  
+> For Neovim < 0.11.0, add `noinsert` and `popup` to your `completeopt` for proper chat completion behavior.
+
+## Optional Dependencies
+
+- [tiktoken_core](https://github.com/gptlang/lua-tiktoken) - For accurate token counting
+
+  - Arch Linux: Install [`luajit-tiktoken-bin`](https://aur.archlinux.org/packages/luajit-tiktoken-bin) or [`lua51-tiktoken-bin`](https://aur.archlinux.org/packages/lua51-tiktoken-bin) from AUR
+  - Via luarocks: `sudo luarocks install --lua-version 5.1 tiktoken_core`
+  - Manual: Download from [lua-tiktoken releases](https://github.com/gptlang/lua-tiktoken/releases) and save as `tiktoken_core.so` in your Lua path
+
+- [git](https://git-scm.com/) - For git diff context features
+
+  - Arch Linux: Install from official repositories
+  - Other systems: Use system package manager or official installer
+
+- [lynx](https://lynx.invisible-island.net/) - For improved URL context features
+  - Arch Linux: Install from official repositories
+  - Other systems: Use system package manager or official installer
 
 # Installation
 
@@ -241,7 +259,7 @@ You can also set default sticky prompts in the configuration:
 {
   sticky = {
     '@models Using Mistral-small',
-    '#files:full',
+    '#files',
   }
 }
 ```
@@ -278,23 +296,25 @@ The default "noop" agent is `none`. For more information:
 
 Contexts provide additional information to the chat. Add context using `#context_name[:input]` syntax:
 
-| Context    | Input Support | Description                         |
-| ---------- | ------------- | ----------------------------------- |
-| `buffer`   | ✓ (number)    | Current or specified buffer content |
-| `buffers`  | ✓ (type)      | All buffers content (listed/all)    |
-| `file`     | ✓ (path)      | Content of specified file           |
-| `files`    | ✓ (mode)      | Workspace files (list/full content) |
-| `git`      | ✓ (ref)       | Git diff (unstaged/staged/commit)   |
-| `url`      | ✓ (url)       | Content from URL                    |
-| `register` | ✓ (name)      | Content of vim register             |
-| `quickfix` | -             | Quickfix list file contents         |
+| Context     | Input Support | Description                         |
+| ----------- | ------------- | ----------------------------------- |
+| `buffer`    | ✓ (number)    | Current or specified buffer content |
+| `buffers`   | ✓ (type)      | All buffers content (listed/all)    |
+| `file`      | ✓ (path)      | Content of specified file           |
+| `files`     | ✓ (glob)      | Workspace files                     |
+| `filenames` | ✓ (glob)      | Workspace file names                |
+| `git`       | ✓ (ref)       | Git diff (unstaged/staged/commit)   |
+| `url`       | ✓ (url)       | Content from URL                    |
+| `register`  | ✓ (name)      | Content of vim register             |
+| `quickfix`  | -             | Quickfix list file contents         |
 
 Examples:
 
 ```markdown
 > #buffer
 > #buffer:2
-> #files:list
+> #files:.lua
+> #filenames
 > #git:staged
 > #url:https://example.com
 ```
@@ -356,6 +376,7 @@ Providers are modules that implement integration with different AI providers.
 
 - `copilot` - Default GitHub Copilot provider used for chat and embeddings
 - `github_models` - Provider for GitHub Marketplace models
+- `copilot_embeddings` - Provider for Copilot embeddings, not standalone
 
 ### Provider Interface
 
@@ -366,73 +387,32 @@ Custom providers can implement these methods:
   -- Optional: Disable provider
   disabled?: boolean,
 
-  -- Optional: Provider to use for embeddings
-  embeddings?: string,
+  -- Optional: Embeddings provider name or function
+  embed?: string|function,
 
-  -- Optional: Get authentication token
-  get_token(): string, number?,
+  -- Optional: Get extra request headers with optional expiration time
+  get_headers(?): table<string,string>, number?,
 
-  -- Required: Get request headers
-  get_headers(token: string): table,
+  -- Optional: Get API endpoint URL
+  get_url?(opts: CopilotChat.Provider.options): string,
 
-  -- Required: Get API endpoint URL
-  get_url(opts: table): string,
+  -- Optional: Prepare request input
+  prepare_input?(inputs: table<CopilotChat.Provider.input>, opts: CopilotChat.Provider.options): table,
 
-  -- Required: Prepare request body
-  prepare_input(inputs: table, opts: table, model: table): table,
+  -- Optional: Prepare response output
+  prepare_output?(output: table, opts: CopilotChat.Provider.options): CopilotChat.Provider.output,
 
   -- Optional: Get available models
-  get_models?(headers: table): table,
+  get_models?(headers: table): table<CopilotChat.Provider.model>,
 
   -- Optional: Get available agents
-  get_agents?(headers: table): table,
+  get_agents?(headers: table): table<CopilotChat.Provider.agent>,
 }
 ```
 
-### Ollama Example
+### External Providers
 
-Here's how to implement an [ollama](https://ollama.com/) provider:
-
-```lua
-{
-  providers = {
-    ollama = {
-      embed = 'copilot_embeddings', -- Use Copilot as embedding provider
-
-      -- Copy copilot input and output processing
-      prepare_input = require('CopilotChat.config.providers').copilot.prepare_input,
-      prepare_output = require('CopilotChat.config.providers').copilot.prepare_output,
-
-      get_headers = function()
-        return {
-          ['Content-Type'] = 'application/json',
-        }
-      end,
-
-      get_models = function(headers)
-        local utils = require('CopilotChat.utils')
-        local response = utils.curl_get('http://localhost:11434/api/tags', { headers = headers })
-        if not response or response.status ~= 200 then
-          error('Failed to fetch models: ' .. tostring(response and response.status))
-        end
-
-        local models = {}
-        for _, model in ipairs(vim.json.decode(response.body)['models']) do
-          table.insert(models, {
-            id = model.name,
-            name = model.name
-          })
-        end
-        return models
-      end,
-
-      get_url = function()
-        return 'http://localhost:11434/api/chat'
-      end,
-    }
-  }
-}
-```
+For external providers (Ollama, LM Studio), see the [external providers wiki page](https://github.com/CopilotC-Nvim/CopilotChat.nvim/wiki/External-Providers).
 
 # Configuration
 
@@ -618,22 +598,34 @@ Below are all available configuration options with their default values:
 
 ## Customizing Buffers
 
-You can set local options for plugin buffers (`copilot-chat`, `copilot-diff`, `copilot-overlay`):
+Types of copilot buffers:
+
+- `copilot-chat` - Main chat buffer
+- `copilot-diff` - Diff overlay buffer
+- `copilot-overlay` - Every other overlay buffer (e.g. help, info)
+
+You can set local options for plugin buffers like this:
 
 ```lua
 vim.api.nvim_create_autocmd('BufEnter', {
     pattern = 'copilot-*',
     callback = function()
         -- Set buffer-local options
-        vim.opt_local.relativenumber = true
-
-        -- Add buffer-local mappings
-        vim.keymap.set('n', '<C-p>', function()
-          print(require("CopilotChat").response())
-        end, { buffer = true })
     end
 })
 ```
+
+## Customizing Highlights
+
+Types of copilot highlights:
+
+- `CopilotChatHeader` - Header highlight in chat buffer
+- `CopilotChatSeparator` - Separator highlight in chat buffer
+- `CopilotChatStatus` - Status and spinner in chat buffer
+- `CopilotChatHelp` - Help messages in chat buffer (help, references)
+- `CopilotChatSelection` - Selection highlight in source buffer
+- `CopilotChatKeyword` - Keyword highlight in chat buffer (e.g. prompts, contexts)
+- `CopilotChatInput` - Input highlight in chat buffer (for contexts)
 
 # API Reference
 
@@ -683,84 +675,9 @@ chat.setup({
 })
 ```
 
-# Tips and Examples
+# Examples
 
-## Quick Chat with Buffer
-
-Set up a quick chat command that uses the entire buffer content:
-
-```lua
--- Quick chat keybinding
-vim.keymap.set('n', '<leader>ccq', function()
-  local input = vim.fn.input("Quick Chat: ")
-  if input ~= "" then
-    require("CopilotChat").ask(input, {
-      selection = require("CopilotChat.select").buffer
-    })
-  end
-end, { desc = "CopilotChat - Quick chat" })
-```
-
-## Inline Chat Window
-
-Configure the chat window to appear inline near the cursor:
-
-```lua
-require("CopilotChat").setup({
-  window = {
-    layout = 'float',
-    relative = 'cursor',
-    width = 1,
-    height = 0.4,
-    row = 1
-  }
-})
-```
-
-## Telescope Integration
-
-Requires [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim):
-
-```lua
-vim.keymap.set('n', '<leader>ccp', function()
-  local actions = require("CopilotChat.actions")
-  require("CopilotChat.integrations.telescope").pick(actions.prompt_actions())
-end, { desc = "CopilotChat - Prompt actions" })
-```
-
-## Quick Search with Perplexity
-
-Requires [PerplexityAI Agent](https://github.com/marketplace/perplexityai):
-
-```lua
-vim.keymap.set({ 'n', 'v' }, '<leader>ccs', function()
-  local input = vim.fn.input("Perplexity: ")
-  if input ~= "" then
-    require("CopilotChat").ask(input, {
-      agent = "perplexityai",
-      selection = false,
-    })
-  end
-end, { desc = "CopilotChat - Perplexity Search" })
-```
-
-## Markdown Rendering
-
-Use [render-markdown.nvim](https://github.com/MeanderingProgrammer/render-markdown.nvim) for better chat display:
-
-```lua
--- Register copilot-chat filetype
-require('render-markdown').setup({
-  file_types = { 'markdown', 'copilot-chat' },
-})
-
--- Adjust chat display settings
-require('CopilotChat').setup({
-  highlight_headers = false,
-  separator = '---',
-  error_header = '> [!ERROR] Error',
-})
-```
+For examples, see the [examples wiki page](https://github.com/CopilotC-Nvim/CopilotChat.nvim/wiki/Examples-and-Tips).
 
 # Development
 
