@@ -111,26 +111,6 @@ function M.temp_file(text)
   return temp_file
 end
 
---- Finds the path to the user's config directory
----@return string?
-function M.config_path()
-  local config = vim.fn.expand('$XDG_CONFIG_HOME')
-  if config and vim.fn.isdirectory(config) > 0 then
-    return config
-  end
-  if vim.fn.has('win32') > 0 then
-    config = vim.fn.expand('$LOCALAPPDATA')
-    if not config or vim.fn.isdirectory(config) == 0 then
-      config = vim.fn.expand('$HOME/AppData/Local')
-    end
-  else
-    config = vim.fn.expand('$HOME/.config')
-  end
-  if config and vim.fn.isdirectory(config) > 0 then
-    return config
-  end
-end
-
 --- Blend a color with the neovim background
 ---@param color_name string The color name
 ---@param blend number The blend percentage
@@ -236,7 +216,7 @@ end
 ---@param filepath string The file path
 ---@return string
 function M.filename(filepath)
-  return vim.fn.fnamemodify(filepath, ':t')
+  return vim.fs.basename(filepath)
 end
 
 --- Get the file path
@@ -364,7 +344,7 @@ M.curl_get = async.wrap(function(url, opts, callback)
       return
     end
 
-    local body, err = M.json_decode(response.body)
+    local body, err = M.json_decode(tostring(response.body))
     if err then
       callback(response, err)
     else
@@ -408,7 +388,7 @@ M.curl_post = async.wrap(function(url, opts, callback)
       return
     end
 
-    local body, err = M.json_decode(response.body)
+    local body, err = M.json_decode(tostring(response.body))
     if err then
       callback(response, err)
     else
@@ -444,13 +424,6 @@ M.scan_dir = async.wrap(function(path, opts, callback)
     })
   )
 end, 3)
-
---- Check if a file exists
----@param path string The file path
-M.file_exists = function(path)
-  local err, stat = async.uv.fs_stat(path)
-  return err == nil and stat ~= nil
-end
 
 --- Get last modified time of a file
 ---@param path string The file path
@@ -490,6 +463,20 @@ end
 M.system = async.wrap(function(cmd, callback)
   vim.system(cmd, { text = true }, callback)
 end, 2)
+
+--- Schedule a function only when needed (not on main thread)
+---@param callback function The callback
+M.schedule_main = async.wrap(function(callback)
+  if vim.in_fast_event() then
+    -- In a fast event, need to schedule
+    vim.schedule(function()
+      callback()
+    end)
+  else
+    -- Already on main thread, call directly
+    callback()
+  end
+end, 1)
 
 --- Get the info for a key.
 ---@param name string

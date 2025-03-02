@@ -202,9 +202,14 @@ end
 ---@param config CopilotChat.config.shared
 function M.update_selection(config)
   local prev_winnr = vim.fn.win_getid(vim.fn.winnr('#'))
-  if prev_winnr ~= state.chat.winnr and vim.fn.win_gettype(prev_winnr) == '' then
+  local prev_bufnr = vim.api.nvim_win_get_buf(prev_winnr)
+  if
+    prev_winnr ~= state.chat.winnr
+    and prev_bufnr ~= state.chat.bufnr
+    and vim.fn.win_gettype(prev_winnr) == ''
+  then
     state.source = {
-      bufnr = vim.api.nvim_win_get_buf(prev_winnr),
+      bufnr = prev_bufnr,
       winnr = prev_winnr,
     }
   end
@@ -496,7 +501,7 @@ function M.complete_items(callback)
       return a.kind < b.kind
     end)
 
-    async.util.scheduler()
+    utils.schedule_main()
     callback(items)
   end)
 end
@@ -577,7 +582,7 @@ function M.select_model()
       }
     end, models)
 
-    async.util.scheduler()
+    utils.schedule_main()
     vim.ui.select(choices, {
       prompt = 'Select a model> ',
       format_item = function(item)
@@ -608,7 +613,7 @@ function M.select_agent()
       }
     end, agents)
 
-    async.util.scheduler()
+    utils.schedule_main()
     vim.ui.select(choices, {
       prompt = 'Select an agent> ',
       format_item = function(item)
@@ -623,6 +628,41 @@ function M.select_agent()
         M.config.agent = choice.id
       end
     end)
+  end)
+end
+
+--- Select a prompt template to use.
+---@param config CopilotChat.config.shared?
+function M.select_prompt(config)
+  local prompts = M.prompts()
+  local keys = vim.tbl_keys(prompts)
+  table.sort(keys)
+
+  local choices = vim
+    .iter(keys)
+    :map(function(name)
+      return {
+        name = name,
+        prompt = prompts[name].prompt,
+      }
+    end)
+    :filter(function(choice)
+      return choice.prompt
+    end)
+    :totable()
+
+  vim.ui.select(choices, {
+    prompt = 'Select prompt action> ',
+    format_item = function(item)
+      return string.format('%s: %s', item.name, item.prompt:gsub('\n', ' '))
+    end,
+  }, function(choice)
+    if choice then
+      M.ask(
+        prompts[choice.name].prompt,
+        vim.tbl_extend('force', prompts[choice.name], config or {})
+      )
+    end
   end)
 end
 
@@ -679,7 +719,7 @@ function M.ask(prompt, config)
       pcall(context.filter_embeddings, prompt, selected_model, config.headless, embeddings)
 
     if not query_ok then
-      async.util.scheduler()
+      utils.schedule_main()
       log.error(filtered_embeddings)
       if not config.headless then
         show_error(filtered_embeddings, has_output)
@@ -704,7 +744,7 @@ function M.ask(prompt, config)
         end),
       })
 
-    async.util.scheduler()
+    utils.schedule_main()
 
     if not ask_ok then
       log.error(response)
@@ -726,6 +766,13 @@ function M.ask(prompt, config)
     end
 
     if not config.headless then
+      if not utils.empty(references) and config.references_display == 'write' then
+        state.chat:append('\n\n**`References`**:')
+        for _, ref in ipairs(references) do
+          state.chat:append(string.format('\n[%s](%s)', ref.name, ref.url))
+        end
+      end
+
       finish()
     end
     if config.callback then
@@ -734,6 +781,7 @@ function M.ask(prompt, config)
   end)
 
   if not ok then
+    utils.schedule_main()
     log.error(err)
     if not config.headless then
       show_error(err)
@@ -785,7 +833,7 @@ function M.save(name, history_path)
   end
 
   local history = vim.json.encode(client.history)
-  history_path = vim.fn.expand(history_path)
+  history_path = vim.fs.normalize(history_path)
   vim.fn.mkdir(history_path, 'p')
   history_path = history_path .. '/' .. name .. '.json'
   local file = io.open(history_path, 'w')
@@ -814,7 +862,7 @@ function M.load(name, history_path)
     return
   end
 
-  history_path = vim.fn.expand(history_path) .. '/' .. name .. '.json'
+  history_path = vim.fs.normalize(history_path) .. '/' .. name .. '.json'
   local file = io.open(history_path, 'r')
   if not file then
     return
@@ -1025,6 +1073,9 @@ function M.setup(config)
     range = true,
   })
 
+  vim.api.nvim_create_user_command('CopilotChatPrompts', function()
+    M.select_prompt()
+  end, { force = true, range = true })
   vim.api.nvim_create_user_command('CopilotChatModels', function()
     M.select_model()
   end, { force = true })

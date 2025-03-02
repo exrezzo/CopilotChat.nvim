@@ -28,7 +28,7 @@ local function match_header(header)
   for _, pattern in ipairs(HEADER_PATTERNS) do
     local filename, start_line, end_line = header:match(pattern)
     if filename then
-      return vim.fn.fnamemodify(filename, ':p:.'),
+      return utils.filepath(filename),
         tonumber(start_line) or 1,
         tonumber(end_line) or tonumber(start_line) or 1
     end
@@ -252,7 +252,7 @@ function Chat:render()
 
     self:show_help(msg, last_section.start_line - last_section.end_line - 1)
 
-    if not utils.empty(self.references) then
+    if not utils.empty(self.references) and self.config.references_display == 'virtual' then
       msg = 'References:\n'
       for _, ref in ipairs(self.references) do
         msg = msg .. '  ' .. ref.name .. '\n'
@@ -371,7 +371,7 @@ end
 
 ---@return boolean
 function Chat:active()
-  return vim.api.nvim_get_current_win() == self.winnr
+  return self:visible() and vim.api.nvim_get_current_win() == self.winnr
 end
 
 ---@return number, number, number
@@ -442,16 +442,17 @@ end
 ---@param config CopilotChat.config.shared
 function Chat:open(config)
   self:validate()
-  self.config = config
 
   local window = config.window or {}
   local layout = window.layout
   local width = window.width > 1 and window.width or math.floor(vim.o.columns * window.width)
   local height = window.height > 1 and window.height or math.floor(vim.o.lines * window.height)
 
-  if self.config.window.layout ~= layout then
+  if self.config and self.config.window and self.config.window.layout ~= layout then
     self:close()
   end
+
+  self.config = config
 
   if self:visible() then
     return
@@ -480,7 +481,6 @@ function Chat:open(config)
     end
     vim.cmd(cmd)
     self.winnr = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(self.winnr, self.bufnr)
     vim.api.nvim_set_current_win(orig)
   elseif layout == 'horizontal' then
     local orig = vim.api.nvim_get_current_win()
@@ -490,11 +490,9 @@ function Chat:open(config)
     end
     vim.cmd(cmd)
     self.winnr = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(self.winnr, self.bufnr)
     vim.api.nvim_set_current_win(orig)
   elseif layout == 'replace' then
     self.winnr = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(self.winnr, self.bufnr)
   end
 
   vim.wo[self.winnr].wrap = true
@@ -510,6 +508,7 @@ function Chat:open(config)
     vim.wo[self.winnr].foldcolumn = '0'
   end
 
+  vim.api.nvim_win_set_buf(self.winnr, self.bufnr)
   self:render()
 end
 

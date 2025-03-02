@@ -53,6 +53,22 @@ CopilotChat.nvim is a Neovim plugin that brings GitHub Copilot Chat capabilities
   - Arch Linux: Install from official repositories
   - Other systems: Use system package manager or official installer
 
+## Integration with pickers
+
+For various plugin pickers to work correctly, you need to replace `vim.ui.select` with your desired picker (as the default `vim.ui.select` is very basic). Here are some examples:
+
+- [fzf-lua](https://github.com/ibhagwan/fzf-lua?tab=readme-ov-file#neovim-api) - call `require('fzf-lua').register_ui_select()`
+- [telescope](https://github.com/nvim-telescope/telescope-ui-select.nvim?tab=readme-ov-file#telescope-setup-and-configuration) - setup `telescope-ui-select.nvim` plugin
+- [snacks.picker](https://github.com/folke/snacks.nvim/blob/main/docs/picker.md#%EF%B8%8F-config) - enable `ui_select` config
+- [mini.pick](https://github.com/echasnovski/mini.pick/blob/main/lua/mini/pick.lua#L1229) - set `vim.ui.select = require('mini.pick').ui_select`
+
+Plugin features that use picker:
+
+- `:CopilotChatPrompts` - for selecting prompts
+- `:CopilotChatModels` - for selecting models
+- `:CopilotChatAgents` - for selecting agents
+- `#<context>:<input>` - for selecting context input
+
 # Installation
 
 ## [lazy.nvim](https://github.com/folke/lazy.nvim)
@@ -134,6 +150,7 @@ Commands are used to control the chat interface:
 | `:CopilotChatReset`        | Reset chat window             |
 | `:CopilotChatSave <name>?` | Save chat history             |
 | `:CopilotChatLoad <name>?` | Load chat history             |
+| `:CopilotChatPrompts`      | View/select prompt templates  |
 | `:CopilotChatModels`       | View/select available models  |
 | `:CopilotChatAgents`       | View/select available agents  |
 | `:CopilotChat<PromptName>` | Use specific prompt template  |
@@ -142,22 +159,22 @@ Commands are used to control the chat interface:
 
 Default mappings in the chat interface:
 
-| Insert  | Normal  | Action                                             |
-| ------- | ------- | -------------------------------------------------- |
-| `<Tab>` | `<Tab>` | Trigger/accept completion menu for tokens          |
-| `<C-c>` | `q`     | Close the chat window                              |
-| `<C-l>` | `<C-l>` | Reset and clear the chat window                    |
-| `<C-s>` | `<CR>`  | Submit the current prompt                          |
-| -       | `gr`    | Toggle sticky prompt for line under cursor         |
-| `<C-y>` | `<C-y>` | Accept nearest diff (best with `COPILOT_GENERATE`) |
-| -       | `gj`    | Jump to section of nearest diff                    |
-| -       | `gqa`   | Add all answers from chat to quickfix list         |
-| -       | `gqd`   | Add all diffs from chat to quickfix list           |
-| -       | `gy`    | Yank nearest diff to register                      |
-| -       | `gd`    | Show diff between source and nearest diff          |
-| -       | `gi`    | Show info about current chat                       |
-| -       | `gc`    | Show current chat context                          |
-| -       | `gh`    | Show help message                                  |
+| Insert  | Normal  | Action                                     |
+| ------- | ------- | ------------------------------------------ |
+| `<Tab>` | `<Tab>` | Trigger/accept completion menu for tokens  |
+| `<C-c>` | `q`     | Close the chat window                      |
+| `<C-l>` | `<C-l>` | Reset and clear the chat window            |
+| `<C-s>` | `<CR>`  | Submit the current prompt                  |
+| -       | `gr`    | Toggle sticky prompt for line under cursor |
+| `<C-y>` | `<C-y>` | Accept nearest diff                        |
+| -       | `gj`    | Jump to section of nearest diff            |
+| -       | `gqa`   | Add all answers from chat to quickfix list |
+| -       | `gqd`   | Add all diffs from chat to quickfix list   |
+| -       | `gy`    | Yank nearest diff to register              |
+| -       | `gd`    | Show diff between source and nearest diff  |
+| -       | `gi`    | Show info about current chat               |
+| -       | `gc`    | Show current chat context                  |
+| -       | `gh`    | Show help message                          |
 
 The mappings can be customized by setting the `mappings` table in your configuration. Each mapping can have:
 
@@ -185,7 +202,7 @@ For example, to change the submit prompt mapping or show_diff full diff option:
 
 ### Predefined Prompts
 
-Predefined prompt templates for common tasks. Reference them with `/PromptName` in chat or use `:CopilotChat<PromptName>`:
+Predefined prompt templates for common tasks. Reference them with `/PromptName` in chat, use `:CopilotChat<PromptName>` or `:CopilotChatPrompts` to select them:
 
 | Prompt     | Description                                      |
 | ---------- | ------------------------------------------------ |
@@ -218,10 +235,9 @@ System prompts define the AI model's behavior. Reference them with `/PROMPT_NAME
 
 | Prompt                 | Description                                |
 | ---------------------- | ------------------------------------------ |
-| `COPILOT_INSTRUCTIONS` | Base GitHub Copilot instructions           |
+| `COPILOT_INSTRUCTIONS` | Base instructions                          |
 | `COPILOT_EXPLAIN`      | Adds coding tutor behavior                 |
 | `COPILOT_REVIEW`       | Adds code review behavior with diagnostics |
-| `COPILOT_GENERATE`     | Adds code generation behavior and rules    |
 
 Define your own system prompts in the configuration (similar to `prompts`):
 
@@ -457,9 +473,9 @@ Below are all available configuration options with their default values:
   },
 
   show_help = true, -- Shows help message as virtual lines when waiting for user input
-  show_folds = true, -- Shows folds for sections in chat
   highlight_selection = true, -- Highlight selection
   highlight_headers = true, -- Highlight headers in chat, disable if using markdown renderers (like render-markdown.nvim)
+  references_display = 'virtual', -- 'virtual', 'write', Display references in chat as virtual text or write to buffer
   auto_follow_cursor = true, -- Auto-follow cursor in chat
   auto_insert_mode = false, -- Automatically enter insert mode when opening window and on new prompt
   insert_at_end = false, -- Move cursor to end of buffer when inserting text
@@ -524,19 +540,19 @@ Below are all available configuration options with their default values:
       prompt = '> /COPILOT_REVIEW\n\nReview the selected code.',
     },
     Fix = {
-      prompt = '> /COPILOT_GENERATE\n\nThere is a problem in this code. Rewrite the code to show it with the bug fixed.',
+      prompt = 'There is a problem in this code. Identify the issues and rewrite the code with fixes. Explain what was wrong and how your changes address the problems.',
     },
     Optimize = {
-      prompt = '> /COPILOT_GENERATE\n\nOptimize the selected code to improve performance and readability.',
+      prompt = 'Optimize the selected code to improve performance and readability. Explain your optimization strategy and the benefits of your changes.',
     },
     Docs = {
-      prompt = '> /COPILOT_GENERATE\n\nPlease add documentation comments to the selected code.',
+      prompt = 'Please add documentation comments to the selected code.',
     },
     Tests = {
-      prompt = '> /COPILOT_GENERATE\n\nPlease generate tests for my code.',
+      prompt = 'Please generate tests for my code.',
     },
     Commit = {
-      prompt = '> #git:staged\n\nWrite commit message for the change with commitizen convention. Make sure the title has maximum 50 characters and message is wrapped at 72 characters. Wrap the whole message in code block with language gitcommit.',
+      prompt = '> #git:staged\n\nWrite commit message for the change with commitizen convention. Keep the title under 50 characters and wrap message at 72 characters. Format as a gitcommit code block.',
     },
   },
 
@@ -611,6 +627,9 @@ vim.api.nvim_create_autocmd('BufEnter', {
     pattern = 'copilot-*',
     callback = function()
         -- Set buffer-local options
+        vim.opt_local.relativenumber = false
+        vim.opt_local.number = false
+        vim.opt_local.conceallevel = 0
     end
 })
 ```
@@ -633,19 +652,23 @@ Types of copilot highlights:
 local chat = require("CopilotChat")
 
 -- Window Management
-chat.open()     -- Open chat window
-chat.open({     -- Open with custom options
+
+-- Open chat window with optional config
+chat.open({
   window = {
     layout = 'float',
     title = 'Custom Chat',
   },
 })
+
 chat.close()    -- Close chat window
 chat.toggle()   -- Toggle chat window
 chat.reset()    -- Reset chat window
+chat.stop()     -- Stop current output
 
 -- Chat Interaction
-chat.ask("Explain this code.")  -- Basic question
+
+-- Ask a question with optional config
 chat.ask("Explain this code.", {
   selection = require("CopilotChat.select").buffer,
   context = { 'buffers', 'files' },
@@ -654,17 +677,23 @@ chat.ask("Explain this code.", {
   end,
 })
 
+chat.select_model() -- Open model selector
+chat.select_agent() -- Open agent selector
+
+-- Open prompt selector with optional config
+chat.select_prompt({
+    callback = function(response)
+        print("Response:", response)
+    end,
+})
+
+-- History Management
+chat.save("my_chat", "my_history_path") -- Save chat history with optional history path
+chat.load("my_chat", "my_history_path") -- Load chat history with optional history path
+
 -- Utilities
-chat.prompts()   -- Get all available prompts
 chat.response()  -- Get last response
 chat.log_level("debug")  -- Set log level
-
-
--- Actions
-local actions = require("CopilotChat.actions")
-actions.pick(actions.prompt_actions({
-    selection = require("CopilotChat.select").visual,
-}))
 
 -- Update config
 chat.setup({
@@ -802,4 +831,4 @@ This project follows the [all-contributors](https://github.com/all-contributors/
 
 # Stargazers
 
-[![Stargazers over time](https://starchart.cc/CopilotC-Nvim/CopilotChat.nvim.svg)](https://starchart.cc/CopilotC-Nvim/CopilotChat.nvim)
+[![Stargazers over time](https://starchart.cc/CopilotC-Nvim/CopilotChat.nvim.svg?variant=adaptive)](https://starchart.cc/CopilotC-Nvim/CopilotChat.nvim)

@@ -1,10 +1,8 @@
-local async = require('plenary.async')
 local utils = require('CopilotChat.utils')
 
 ---@class CopilotChat.Provider.model
 ---@field id string
 ---@field name string
----@field version string?
 ---@field tokenizer string?
 ---@field max_input_tokens number?
 ---@field max_output_tokens number?
@@ -56,14 +54,30 @@ local EDITOR_VERSION = 'Neovim/'
 
 local cached_github_token = nil
 
+local function config_path()
+  local config = vim.fs.normalize('$XDG_CONFIG_HOME')
+  if config and vim.uv.fs_stat(config) then
+    return config
+  end
+  if vim.fn.has('win32') > 0 then
+    config = vim.fs.normalize('$LOCALAPPDATA')
+    if not config or not vim.uv.fs_stat(config) then
+      config = vim.fs.normalize('$HOME/AppData/Local')
+    end
+  else
+    config = vim.fs.normalize('$HOME/.config')
+  end
+  if config and vim.uv.fs_stat(config) then
+    return config
+  end
+end
+
 --- Get the github copilot oauth cached token (gu_ token)
 ---@return string
 local function get_github_token()
   if cached_github_token then
     return cached_github_token
   end
-
-  async.util.scheduler()
 
   -- loading token from the environment only in GitHub Codespaces
   local token = os.getenv('GITHUB_TOKEN')
@@ -74,7 +88,7 @@ local function get_github_token()
   end
 
   -- loading token from the file
-  local config_path = utils.config_path()
+  local config_path = config_path()
   if not config_path then
     error('Failed to find config path for GitHub token')
   end
@@ -86,12 +100,15 @@ local function get_github_token()
   }
 
   for _, file_path in ipairs(file_paths) do
-    if vim.fn.filereadable(file_path) == 1 then
-      local userdata = vim.fn.json_decode(vim.fn.readfile(file_path))
-      for key, value in pairs(userdata) do
-        if string.find(key, 'github.com') then
-          cached_github_token = value.oauth_token
-          return value.oauth_token
+    local file_data = utils.read_file(file_path)
+    if file_data then
+      local parsed_data = utils.json_decode(file_data)
+      if parsed_data then
+        for key, value in pairs(parsed_data) do
+          if string.find(key, 'github.com') then
+            cached_github_token = value.oauth_token
+            return value.oauth_token
+          end
         end
       end
     end
@@ -159,13 +176,12 @@ M.copilot = {
     local models = vim
       .iter(response.body.data)
       :filter(function(model)
-        return model['capabilities']['type'] == 'chat'
+        return model.model_picker_enabled and model.capabilities.type == 'chat'
       end)
       :map(function(model)
         return {
           id = model.id,
           name = model.name,
-          version = model.version,
           tokenizer = model.capabilities.tokenizer,
           max_input_tokens = model.capabilities.limits.max_prompt_tokens,
           max_output_tokens = model.capabilities.limits.max_output_tokens,
@@ -310,7 +326,6 @@ M.github_models = {
         return {
           id = model.name,
           name = model.displayName,
-          version = model.name .. '-' .. model.version,
           tokenizer = 'o200k_base',
           max_input_tokens = model.modelLimits.textLimits.inputContextWindow,
           max_output_tokens = model.modelLimits.textLimits.maxOutputTokens,
